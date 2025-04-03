@@ -1,0 +1,368 @@
+import 'dart:convert';
+import 'dart:io';
+import 'package:flutter/material.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:intl/intl.dart';
+import 'package:share_plus/share_plus.dart';
+import 'package:url_launcher/url_launcher.dart';
+import 'package:google_mobile_ads/google_mobile_ads.dart';
+
+void main() {
+  WidgetsFlutterBinding.ensureInitialized();
+  MobileAds.instance.initialize();
+  runApp(const BatchApp());
+}
+
+class BatchApp extends StatelessWidget {
+  const BatchApp({Key? key}) : super(key: key);
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      title: 'Batch Tracker',
+      theme: ThemeData.dark(),
+      home: const BatchListScreen(),
+    );
+  }
+}
+
+class BatchListScreen extends StatefulWidget {
+  const BatchListScreen({Key? key}) : super(key: key);
+
+  @override
+  _BatchListScreenState createState() => _BatchListScreenState();
+}
+
+class _BatchListScreenState extends State<BatchListScreen> {
+  Map<String, dynamic> data = {};
+  final TextEditingController batchController = TextEditingController();
+
+  @override
+  void initState() {
+    super.initState();
+    _loadData();
+  }
+
+  Future<File> get _localFile async {
+    final dir = await getApplicationDocumentsDirectory();
+    return File('${dir.path}/data.json');
+  }
+
+  Future<void> _loadData() async {
+    try {
+      final file = await _localFile;
+      if (await file.exists()) {
+        final content = await file.readAsString();
+        setState(() {
+          data = json.decode(content);
+        });
+      }
+    } catch (e) {
+      _showError('Error loading data: $e');
+    }
+  }
+
+  Future<void> _saveData() async {
+    try {
+      final file = await _localFile;
+      await file.writeAsString(json.encode(data));
+    } catch (e) {
+      _showError('Error saving data: $e');
+    }
+  }
+
+  void _addBatch() {
+    final batch = batchController.text.trim();
+    if (batch.isNotEmpty && !data.containsKey(batch)) {
+      setState(() {
+        data[batch] = {
+          'created': DateFormat('MM-dd HH:mm').format(DateTime.now()),
+          'plato': [],
+        };
+      });
+      _saveData();
+      batchController.clear();
+    }
+  }
+
+  void _deleteBatch(String batch) {
+    setState(() {
+      data.remove(batch);
+    });
+    _saveData();
+  }
+
+  void _editBatch(String oldBatch) {
+    final controller = TextEditingController(text: oldBatch);
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Edit Batch'),
+        content: TextField(
+          controller: controller,
+          decoration: const InputDecoration(hintText: 'Enter new batch name'),
+          onSubmitted: (value) => _updateBatch(oldBatch, value),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => _updateBatch(oldBatch, controller.text),
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _updateBatch(String oldBatch, String newBatch) {
+    final trimmed = newBatch.trim();
+    if (trimmed.isNotEmpty && trimmed != oldBatch && !data.containsKey(trimmed)) {
+      setState(() {
+        final temp = data[oldBatch];
+        data.remove(oldBatch);
+        data[trimmed] = temp;
+      });
+      _saveData();
+    }
+    Navigator.pop(context);
+  }
+
+  Future<void> _shareCSV() async {
+    final csvContent = StringBuffer();
+    csvContent.writeln('Batch,Created,Latest Plato,Plato Timestamp');
+    data.forEach((batch, details) {
+      final created = details['created'];
+      final platoList = details['plato'] as List<dynamic>;
+      if (platoList.isNotEmpty) {
+        final latestPlato = platoList.last;
+        final platoValue = latestPlato['value'];
+        final platoTimestamp = latestPlato['timestamp'];
+        csvContent.writeln('$batch,$created,$platoValue,$platoTimestamp');
+      } else {
+        csvContent.writeln('$batch,$created,,');
+      }
+    });
+
+    final tempDir = await getTemporaryDirectory();
+    final csvFile = File('${tempDir.path}/batch_list.csv');
+    await csvFile.writeAsString(csvContent.toString());
+
+    Share.shareXFiles([XFile(csvFile.path)], text: 'Batch List CSV');
+  }
+
+  void _showError(String message) {
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final batchList = data.keys.toList().reversed.toList();
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Batch List'),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.share),
+            onPressed: _shareCSV,
+          ),
+        ],
+      ),
+      body: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.all(10),
+            child: Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: batchController,
+                    decoration: const InputDecoration(hintText: 'Enter Batch Number'),
+                    onSubmitted: (_) => _addBatch(),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                ElevatedButton(
+                  onPressed: _addBatch,
+                  child: const Text('Add'),
+                ),
+              ],
+            ),
+          ),
+          Expanded(
+            child: batchList.isEmpty
+                ? const Center(child: Text('No batches available'))
+                : ListView.builder(
+              itemCount: batchList.length,
+              itemBuilder: (context, index) {
+                final batch = batchList[index];
+                final platoList = data[batch]['plato'] as List<dynamic>;
+                final subtitle = platoList.isNotEmpty
+                    ? 'Latest Plato: ${platoList.last['value']} at ${platoList.last['timestamp']}'
+                    : 'No Plato recorded';
+                return ListTile(
+                  title: Text('$batch | ${data[batch]['created']}'),
+                  subtitle: Text(subtitle),
+                  trailing: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      IconButton(
+                        icon: const Icon(Icons.edit),
+                        onPressed: () => _editBatch(batch),
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.delete),
+                        onPressed: () => _deleteBatch(batch),
+                      ),
+                    ],
+                  ),
+                  onTap: () => Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (context) => PlatoScreen(
+                        batch: batch,
+                        data: data,
+                        saveData: _saveData,
+                      ),
+                    ),
+                  ),
+                );
+              },
+            ),
+          ),
+        ],
+      ),
+      bottomNavigationBar: Container(
+        color: Colors.black,
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            GestureDetector(
+              onTap: () async {
+                const url = 'https://ein-glas.com';
+                if (await canLaunchUrl(Uri.parse(url))) {
+                  await launchUrl(Uri.parse(url), mode: LaunchMode.externalApplication);
+                }
+              },
+              child: const Text(
+                'ein-glas.com',
+                style: TextStyle(
+                  color: Colors.white,
+                  decoration: TextDecoration.underline,
+                ),
+              ),
+            ),
+            const Text(
+              'Created by Dipl.Brmst Taesoon',
+              style: TextStyle(color: Colors.white),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class PlatoScreen extends StatefulWidget {
+  final String batch;
+  final Map<String, dynamic> data;
+  final Future<void> Function() saveData;
+
+  const PlatoScreen({
+    Key? key,
+    required this.batch,
+    required this.data,
+    required this.saveData,
+  }) : super(key: key);
+
+  @override
+  State<PlatoScreen> createState() => _PlatoScreenState();
+}
+
+class _PlatoScreenState extends State<PlatoScreen> {
+  final TextEditingController _platoController = TextEditingController();
+
+  void _addPlato() {
+    final input = _platoController.text.trim();
+    if (input.isNotEmpty) {
+      final value = double.tryParse(input);
+      if (value != null) {
+        final entry = {
+          'value': value,
+          'timestamp': DateFormat('MM-dd HH:mm').format(DateTime.now()),
+        };
+
+        setState(() {
+          widget.data[widget.batch]['plato'].add(entry);
+        });
+
+        widget.saveData();
+        _platoController.clear();
+      } else {
+        _showError('Please enter a valid number');
+      }
+    }
+  }
+
+  void _showError(String msg) {
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final platoList = widget.data[widget.batch]['plato'] as List<dynamic>;
+
+    return Scaffold(
+      appBar: AppBar(
+        title: Text('Plato for ${widget.batch}'),
+      ),
+      body: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          children: [
+            Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: _platoController,
+                    keyboardType: TextInputType.numberWithOptions(decimal: true),
+                    decoration: const InputDecoration(
+                      labelText: 'Enter Plato value',
+                      border: OutlineInputBorder(),
+                    ),
+                    onSubmitted: (_) => _addPlato(),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                ElevatedButton(
+                  onPressed: _addPlato,
+                  child: const Text('Add'),
+                ),
+              ],
+            ),
+            const SizedBox(height: 20),
+            const Text('Plato History:', style: TextStyle(fontSize: 16)),
+            const SizedBox(height: 10),
+            Expanded(
+              child: platoList.isEmpty
+                  ? const Center(child: Text('No Plato values yet'))
+                  : ListView.builder(
+                itemCount: platoList.length,
+                itemBuilder: (context, index) {
+                  final item = platoList[index];
+                  return ListTile(
+                    title: Text('Plato: ${item['value']}'),
+                    subtitle: Text('At: ${item['timestamp']}'),
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
