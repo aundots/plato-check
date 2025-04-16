@@ -1,0 +1,1469 @@
+import 'dart:convert';
+import 'dart:io';
+import 'dart:math' as math;
+import 'package:flutter/material.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:intl/intl.dart';
+import 'package:share_plus/share_plus.dart';
+import 'package:url_launcher/url_launcher.dart';
+import 'package:fl_chart/fl_chart.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:add_2_calendar/add_2_calendar.dart';
+
+// ------------------- GLOBAL VARIABLES & HELPER FUNCTIONS -------------------
+bool enableDebugLogs = true;
+void logDebug(String message) {
+  if (enableDebugLogs) {
+    debugPrint('[DEBUG] $message');
+  }
+}
+
+double platoToSG(double plato) {
+  return 1 + (plato / (258.6 - ((plato / 258.2) * 227.1)));
+}
+
+double sgToPlato(double sg) {
+  return (258.6 * (sg - 1)) / (1 + ((sg - 1) * 227.1 / 258.2));
+}
+
+FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin =
+FlutterLocalNotificationsPlugin();
+
+// ------------------- MAIN ENTRY -------------------
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  const AndroidInitializationSettings initializationSettingsAndroid =
+  AndroidInitializationSettings('@mipmap/ic_launcher');
+  const DarwinInitializationSettings initializationSettingsIOS =
+  DarwinInitializationSettings(
+    requestAlertPermission: true,
+    requestBadgePermission: true,
+    requestSoundPermission: true,
+  );
+  const InitializationSettings initializationSettings = InitializationSettings(
+    android: initializationSettingsAndroid,
+    iOS: initializationSettingsIOS,
+  );
+  await flutterLocalNotificationsPlugin.initialize(initializationSettings);
+  runApp(const BatchApp());
+}
+
+// ------------------- NOTIFICATIONS & CALENDAR -------------------
+Future<void> scheduleNotification(DateTime scheduledTime, String batch) async {
+  // androidScheduleMode 파라미터 제거(최신 플러그인 기준)
+  const NotificationDetails platformChannelSpecifics = NotificationDetails(
+    android: AndroidNotificationDetails(
+      'batch_tracker_channel',
+      'Batch Tracker Notifications',
+      channelDescription: 'Notifications for Batch Tracker app',
+      importance: Importance.max,
+      priority: Priority.high,
+    ),
+    iOS: DarwinNotificationDetails(),
+  );
+
+  await flutterLocalNotificationsPlugin.schedule(
+    0,
+    'Batch Tracker Reminder',
+    'Target Plato reached for batch $batch!',
+    scheduledTime,
+    platformChannelSpecifics,
+    payload: batch,
+  );
+}
+
+Future<void> requestNotificationPermissions() async {
+  if (Platform.isIOS) {
+    await flutterLocalNotificationsPlugin
+        .resolvePlatformSpecificImplementation<IOSFlutterLocalNotificationsPlugin>()
+        ?.requestPermissions(alert: true, badge: true, sound: true);
+  }
+  // Android의 경우, 최신 버전에서는 별도 권한 요청 필요 없음.
+}
+
+void addToCalendar(DateTime eventTime, String batch) {
+  final Event event = Event(
+    title: 'Batch Tracker: Target Plato Reached',
+    description: 'Target Plato reached for batch $batch',
+    startDate: eventTime,
+    endDate: eventTime.add(const Duration(minutes: 30)),
+    iosParams: const IOSParams(reminder: Duration(minutes: 15)),
+    androidParams: const AndroidParams(emailInvites: []),
+  );
+  Add2Calendar.addEvent2Cal(event);
+}
+
+// ------------------- APP UI -------------------
+class BatchApp extends StatelessWidget {
+  const BatchApp({Key? key}) : super(key: key);
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      title: 'Batch Tracker',
+      theme: ThemeData(
+        brightness: Brightness.dark,
+        primarySwatch: Colors.blue,
+      ),
+      home: const BatchListScreen(),
+    );
+  }
+}
+
+class BatchListScreen extends StatefulWidget {
+  const BatchListScreen({Key? key}) : super(key: key);
+
+  @override
+  _BatchListScreenState createState() => _BatchListScreenState();
+}
+
+class _BatchListScreenState extends State<BatchListScreen> {
+  Map<String, dynamic> data = {};
+  final TextEditingController batchController = TextEditingController();
+  bool showPlato = true;
+  bool _dataChanged = false; // 데이터 변경 여부 플래그
+
+  @override
+  void initState() {
+    super.initState();
+    _loadData();
+  }
+
+  Future<File> get _localFile async {
+    final dir = await getApplicationDocumentsDirectory();
+    return File('${dir.path}/data.json');
+  }
+
+  Future<void> _loadData() async {
+    try {
+      final file = await _localFile;
+      if (await file.exists()) {
+        final content = await file.readAsString();
+        setState(() {
+          data = json.decode(content);
+          _dataChanged = false;
+        });
+        logDebug('Data loaded successfully: ${data.keys.length} batches');
+      }
+    } catch (e) {
+      logDebug('Error loading data: $e');
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('Error loading data: $e')));
+    }
+  }
+
+  Future<void> _saveData() async {
+    if (!_dataChanged) {
+      logDebug('No data changes to save');
+      return;
+    }
+    try {
+      final file = await _localFile;
+      await file.writeAsString(json.encode(data));
+      _dataChanged = false;
+      logDebug('Data saved successfully');
+    } catch (e) {
+      logDebug('Error saving data: $e');
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('Error saving data: $e')));
+    }
+  }
+
+  Future<void> _exportToCSV() async {
+    final buffer = StringBuffer();
+    buffer.writeln('Batch,Date,Plato Value,Date');
+    for (var entry in data.entries) {
+      final batch = entry.key;
+      final date = entry.value['date'];
+      final platos = entry.value['plato'] as List<dynamic>;
+      if (platos.isEmpty) {
+        buffer.writeln('$batch,$date,,');
+      } else {
+        for (var p in platos) {
+          buffer.writeln('$batch,$date,${p['value']},${p['date']}');
+        }
+      }
+    }
+    final dir = await getTemporaryDirectory();
+    final file = File('${dir.path}/batches.csv');
+    await file.writeAsString(buffer.toString());
+    Share.shareXFiles([XFile(file.path)], text: 'Batch Data Export');
+  }
+
+  void _addBatch() {
+    final batch = batchController.text.trim();
+    if (batch.isNotEmpty && !data.containsKey(batch)) {
+      setState(() {
+        data[batch] = {
+          'date': DateFormat('MM-dd HH:mm').format(DateTime.now()),
+          'plato': <Map<String, String>>[],
+        };
+        _dataChanged = true;
+      });
+      _saveData();
+      batchController.clear();
+      logDebug('Added batch: $batch');
+    }
+  }
+
+  void _confirmDeleteBatch(String batch) {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Confirm Deletion'),
+        content: Text('Are you sure you want to delete the batch "$batch"?'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Cancel')),
+          TextButton(
+              onPressed: () {
+                Navigator.pop(context);
+                setState(() {
+                  data.remove(batch);
+                  _dataChanged = true;
+                });
+                _saveData();
+                logDebug('Deleted batch: $batch');
+              },
+              child: const Text('Delete')),
+        ],
+      ),
+    );
+  }
+
+  void _editBatch(String oldBatch) {
+    final nameController = TextEditingController(text: oldBatch);
+    DateTime selectedDate;
+    try {
+      selectedDate = DateFormat('MM-dd HH:mm').parse(data[oldBatch]['date']);
+      selectedDate = DateTime(
+          DateTime.now().year,
+          selectedDate.month,
+          selectedDate.day,
+          selectedDate.hour,
+          selectedDate.minute);
+    } catch (e) {
+      selectedDate = DateTime.now();
+      logDebug('Error parsing batch date: $e');
+    }
+    showDialog(
+      context: context,
+      builder: (context) {
+        return StatefulBuilder(builder: (context, setStateDialog) {
+          return AlertDialog(
+            title: const Text('Edit Batch'),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextField(
+                  controller: nameController,
+                  decoration: const InputDecoration(labelText: 'Batch Name'),
+                ),
+                const SizedBox(height: 10),
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                          'Date: ${DateFormat('MM-dd HH:mm').format(selectedDate)}'),
+                    ),
+                    IconButton(
+                        icon: const Icon(Icons.calendar_today),
+                        onPressed: () async {
+                          DateTime? pickedDate = await showDatePicker(
+                            context: context,
+                            initialDate: selectedDate,
+                            firstDate: DateTime(2000),
+                            lastDate: DateTime(2100),
+                          );
+                          if (pickedDate != null) {
+                            TimeOfDay? pickedTime = await showTimePicker(
+                              context: context,
+                              initialTime: TimeOfDay.fromDateTime(selectedDate),
+                            );
+                            if (pickedTime != null) {
+                              setStateDialog(() {
+                                selectedDate = DateTime(
+                                  pickedDate.year,
+                                  pickedDate.month,
+                                  pickedDate.day,
+                                  pickedTime.hour,
+                                  pickedTime.minute,
+                                );
+                              });
+                            }
+                          }
+                        }),
+                  ],
+                ),
+              ],
+            ),
+            actions: [
+              TextButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: const Text('Cancel')),
+              TextButton(
+                  onPressed: () {
+                    final newName = nameController.text.trim();
+                    if (newName.isNotEmpty &&
+                        (!data.containsKey(newName) || newName == oldBatch)) {
+                      setState(() {
+                        final temp = data[oldBatch];
+                        data.remove(oldBatch);
+                        temp['date'] =
+                            DateFormat('MM-dd HH:mm').format(selectedDate);
+                        data[newName] = temp;
+                        _dataChanged = true;
+                      });
+                      _saveData();
+                      Navigator.pop(context);
+                      logDebug('Edited batch: $oldBatch to $newName');
+                    }
+                  },
+                  child: const Text('Save')),
+            ],
+          );
+        });
+      },
+    );
+  }
+
+  void _sendFeedback() async {
+    final Uri emailLaunchUri = Uri(
+      scheme: 'mailto',
+      path: 'ga72qah@gmail.com',
+      query: Uri.encodeFull(
+          'subject=Batch Tracker Feedback&body=Hello,\n\nI would like to share the following feedback:\n'),
+    );
+    if (await canLaunchUrl(emailLaunchUri)) {
+      await launchUrl(emailLaunchUri, mode: LaunchMode.externalApplication);
+    } else {
+      final Uri gmailUri = Uri.parse(
+          'https://mail.google.com/mail/?view=cm&fs=1&to=ga72qah@gmail.com&su=Batch+Tracker+Feedback&body=Hello,%0A%0AI+would+like+to+share+the+following+feedback:%0A');
+      if (await canLaunchUrl(gmailUri)) {
+        await launchUrl(gmailUri, mode: LaunchMode.externalApplication);
+      } else {
+        final Uri outlookUri = Uri.parse(
+            'https://outlook.live.com/owa/?path=/mail/action/compose&to=ga72qah@gmail.com&subject=Batch%20Tracker%20Feedback&body=Hello,');
+        if (await canLaunchUrl(outlookUri)) {
+          await launchUrl(outlookUri, mode: LaunchMode.externalApplication);
+        } else {
+          ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('No email client available')));
+        }
+      }
+    }
+  }
+
+  void _launchEinGlas() async {
+    final url = Uri.parse('https://ein-glas.com');
+    if (!await launchUrl(url, mode: LaunchMode.externalApplication)) {
+      logDebug('Could not launch URL: $url');
+      throw 'Could not launch $url';
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final batchList = data.keys.toList().reversed.toList();
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Batch List'),
+        actions: [
+          ToggleButtons(
+            borderRadius: BorderRadius.circular(8),
+            children: const [
+              Padding(
+                padding: EdgeInsets.symmetric(horizontal: 8),
+                child: Text("Plato"),
+              ),
+              Padding(
+                padding: EdgeInsets.symmetric(horizontal: 8),
+                child: Text("SG"),
+              ),
+            ],
+            isSelected: [showPlato, !showPlato],
+            onPressed: (index) {
+              setState(() {
+                showPlato = (index == 0);
+              });
+            },
+          ),
+          IconButton(
+              icon: const Icon(Icons.share), onPressed: _exportToCSV),
+        ],
+      ),
+      body: Stack(
+        children: [
+          Column(
+            children: [
+              Padding(
+                padding: const EdgeInsets.all(10),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: TextField(
+                        controller: batchController,
+                        decoration: const InputDecoration(
+                          hintText: 'Enter Batch Number',
+                        ),
+                        onSubmitted: (_) => _addBatch(),
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    ElevatedButton(
+                        onPressed: _addBatch, child: const Text('Add')),
+                  ],
+                ),
+              ),
+              Expanded(
+                child: batchList.isEmpty
+                    ? const Center(
+                    child: Text(
+                        'Your batch list is empty. Create your first batch!'))
+                    : ListView.builder(
+                  itemCount: batchList.length,
+                  itemBuilder: (context, index) {
+                    final batch = batchList[index];
+                    final platoList =
+                    data[batch]['plato'] as List<dynamic>;
+                    String subtitle;
+                    if (platoList.isNotEmpty) {
+                      final latest = platoList.last;
+                      if (showPlato) {
+                        subtitle =
+                        'Latest Plato: ${latest['value']} at ${latest['date']}';
+                      } else {
+                        double platoVal =
+                            double.tryParse(latest['value']) ?? 0;
+                        double sg = platoToSG(platoVal);
+                        subtitle =
+                        'Latest SG: ${sg.toStringAsFixed(3)} at ${latest['date']}';
+                      }
+                    } else {
+                      subtitle = 'No Plato recorded';
+                    }
+                    return ListTile(
+                      title: Text('$batch | ${data[batch]['date']}'),
+                      subtitle: Text(subtitle),
+                      trailing: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          IconButton(
+                              icon: const Icon(Icons.edit),
+                              onPressed: () => _editBatch(batch)),
+                          IconButton(
+                              icon: const Icon(Icons.delete),
+                              onPressed: () =>
+                                  _confirmDeleteBatch(batch)),
+                        ],
+                      ),
+                      onTap: () async {
+                        await Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                            builder: (context) => PlatoScreen(
+                              batch: batch,
+                              data: data,
+                              saveData: _saveData,
+                              showPlato: showPlato,
+                            ),
+                          ),
+                        );
+                        setState(() {});
+                      },
+                    );
+                  },
+                ),
+              ),
+              const SizedBox(height: 60),
+            ],
+          ),
+          Positioned(
+            bottom: 10,
+            left: 20,
+            right: 20,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    ElevatedButton.icon(
+                      onPressed: _sendFeedback,
+                      icon: const Icon(Icons.feedback),
+                      label: const Text('Feedback'),
+                      style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.blueAccent),
+                    ),
+                    GestureDetector(
+                      onTap: _launchEinGlas,
+                      child: Image.asset(
+                        'assets/logo.jpg',
+                        height: 40,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                const Align(
+                  alignment: Alignment.bottomRight,
+                  child: Text(
+                    'Created by Dipl.Brmst Taesoon',
+                    style: TextStyle(color: Colors.white70, fontSize: 12),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ------------------- PlatoScreen -------------------
+class ParsedPlatoEntry {
+  final double value;
+  final DateTime date;
+  final String rawDate;
+  ParsedPlatoEntry({
+    required this.value,
+    required this.date,
+    required this.rawDate,
+  });
+}
+
+class PlatoScreen extends StatefulWidget {
+  final String batch;
+  final Map<String, dynamic> data;
+  final VoidCallback saveData;
+  final bool showPlato;
+  const PlatoScreen({
+    Key? key,
+    required this.batch,
+    required this.data,
+    required this.saveData,
+    required this.showPlato,
+  }) : super(key: key);
+
+  @override
+  _PlatoScreenState createState() => _PlatoScreenState();
+}
+
+class _PlatoScreenState extends State<PlatoScreen> {
+  final TextEditingController platoController = TextEditingController();
+  final TextEditingController attenuationController = TextEditingController();
+  final TextEditingController targetPlatoController = TextEditingController();
+  double? predictedFG;
+  String predictionResult = "";
+  DateTime? predictedTime;
+  bool setReminder = false;
+  List<ParsedPlatoEntry>? _cachedPlatoEntries; // 캐싱된 Plato 데이터
+
+  @override
+  void initState() {
+    super.initState();
+    _parsePlatoEntries();
+    attenuationController.addListener(_calculatePredictedFG);
+    requestNotificationPermissions();
+  }
+
+  @override
+  void dispose() {
+    platoController.dispose();
+    attenuationController.dispose();
+    targetPlatoController.dispose();
+    super.dispose();
+  }
+
+  void _parsePlatoEntries() {
+    final platoList = widget.data[widget.batch]['plato'] as List<dynamic>;
+    final format = DateFormat('MM-dd HH:mm');
+    _cachedPlatoEntries = platoList.map((entry) {
+      try {
+        final date = format.parse(entry['date']);
+        final value = double.tryParse(entry['value']) ?? 0;
+        return ParsedPlatoEntry(
+          value: value,
+          date: date,
+          rawDate: entry['date'],
+        );
+      } catch (e) {
+        logDebug('Error parsing Plato entry: $e');
+        return ParsedPlatoEntry(
+          value: 0,
+          date: DateTime.now(),
+          rawDate: entry['date'],
+        );
+      }
+    }).toList();
+    logDebug('Parsed ${_cachedPlatoEntries?.length} Plato entries');
+  }
+
+  double calculateABV(double currentPlato, double initialPlato) {
+    final og = platoToSG(initialPlato);
+    final sg = platoToSG(currentPlato);
+    return (og - sg) * 131.25;
+  }
+
+  void _calculatePredictedFG() {
+    if (_cachedPlatoEntries == null || _cachedPlatoEntries!.isEmpty) {
+      setState(() {
+        predictedFG = null;
+      });
+      return;
+    }
+    final initialPlato = _cachedPlatoEntries!.first.value;
+    final attenuationPercent = double.tryParse(attenuationController.text);
+    if (attenuationPercent != null) {
+      setState(() {
+        predictedFG = initialPlato * (1 - attenuationPercent / 100);
+      });
+      logDebug('Predicted FG: $predictedFG with attenuation: $attenuationPercent%');
+    } else {
+      setState(() {
+        predictedFG = null;
+      });
+      logDebug('Attenuation percent is invalid');
+    }
+  }
+
+  Map<String, double>? _fitExponentialDecayModel() {
+    if (_cachedPlatoEntries == null || _cachedPlatoEntries!.length < 2) {
+      logDebug('Insufficient data for exponential decay model');
+      return null;
+    }
+    final baseTime = _cachedPlatoEntries!.first.date;
+    final List<double> t = [];
+    final List<double> y = [];
+    for (var entry in _cachedPlatoEntries!) {
+      t.add(entry.date.difference(baseTime).inMinutes.toDouble());
+      y.add(entry.value);
+    }
+    double X0 = y.first;
+    double Xinf = 0;
+    if (X0 == Xinf) {
+      logDebug('X0 equals Xinf, cannot compute decay');
+      return null;
+    }
+    final List<double> lnTerms = [];
+    final List<double> filteredT = [];
+    for (int i = 0; i < t.length; i++) {
+      double numerator = y[i] - Xinf;
+      double denominator = X0 - Xinf;
+      if (numerator > 0 && denominator > 0) {
+        lnTerms.add(math.log(numerator / denominator));
+        filteredT.add(t[i]);
+      }
+    }
+    if (lnTerms.isEmpty) {
+      logDebug('No valid data points for logarithmic computation');
+      return null;
+    }
+    double k;
+    if (lnTerms.length == 1) {
+      k = 0.01;
+      logDebug('Using default k=0.01 due to single data point');
+    } else {
+      final n = filteredT.length;
+      final sumT = filteredT.reduce((a, b) => a + b);
+      final sumLn = lnTerms.reduce((a, b) => a + b);
+      final sumT2 = filteredT.fold(0.0, (double sum, double ti) => sum + ti * ti);
+      final sumTLn = filteredT.asMap().entries.fold(0.0, (double sum, MapEntry<int, double> entry) => sum + entry.value * lnTerms[entry.key]);
+      final denom = n * sumT2 - sumT * sumT;
+      if (denom == 0) {
+        logDebug('Denominator is zero in decay rate calculation');
+        return null;
+      }
+      k = -(n * sumTLn - sumT * sumLn) / denom;
+    }
+    return {
+      "X0": X0,
+      "Xinf": Xinf,
+      "k": k,
+      "baseTime": baseTime.millisecondsSinceEpoch.toDouble(),
+    };
+  }
+
+  void _predictTargetTime() {
+    final params = _fitExponentialDecayModel();
+    if (params == null) {
+      setState(() {
+        predictionResult =
+        "Prediction unavailable due to insufficient or inconsistent data.";
+        predictedTime = null;
+        setReminder = false;
+      });
+      return;
+    }
+    double X0 = params["X0"]!;
+    double Xinf = params["Xinf"]!;
+    double k = params["k"]!;
+    double baseTimeEpoch = params["baseTime"]!;
+    double? target = double.tryParse(targetPlatoController.text);
+    if (target == null || target <= 0) {
+      setState(() {
+        predictionResult = "Target value must be a positive number.";
+        predictedTime = null;
+        setReminder = false;
+      });
+      logDebug('Invalid target value: $target');
+      return;
+    }
+    if (!widget.showPlato) {
+      // SG 입력 시 SG → Plato 변환
+      target = sgToPlato(target);
+    }
+    if (X0 <= Xinf) {
+      setState(() {
+        predictionResult =
+        "Data does not show a decreasing trend, exponential decay model is not applicable.";
+        predictedTime = null;
+        setReminder = false;
+      });
+      logDebug('No decreasing trend: X0=$X0, Xinf=$Xinf');
+      return;
+    }
+    if (k <= 0) {
+      setState(() {
+        predictionResult = "Invalid decay rate, unable to predict.";
+        predictedTime = null;
+        setReminder = false;
+      });
+      logDebug('Invalid decay rate: k=$k');
+      return;
+    }
+    if (target >= X0) {
+      setState(() {
+        predictionResult =
+        "Target value ($target) cannot be greater than or equal to the initial ${widget.showPlato ? "Plato" : "SG"} value ($X0).";
+        predictedTime = null;
+        setReminder = false;
+      });
+      logDebug('Target exceeds initial value: target=$target, X0=$X0');
+      return;
+    }
+    final ratio = (target - Xinf) / (X0 - Xinf);
+    if (ratio <= 0 || ratio.isNaN || ratio.isInfinite) {
+      setState(() {
+        predictionResult =
+        "Target value ($target) is below the expected final value ($Xinf). Prediction may be inaccurate.";
+      });
+      logDebug('Invalid ratio: $ratio');
+    }
+    double t = -1 / k * math.log(ratio);
+    DateTime baseTime = DateTime.fromMillisecondsSinceEpoch(baseTimeEpoch.toInt());
+    DateTime predicted = baseTime.add(Duration(minutes: t.round()));
+    setState(() {
+      predictedTime = predicted;
+      predictionResult =
+      "Estimated target reached at: ${DateFormat('MM-dd HH:mm').format(predicted)}";
+      setReminder = false;
+    });
+    logDebug('Prediction successful: $predictionResult');
+  }
+
+  void _savePlato() {
+    final value = platoController.text.trim();
+    if (value.isNotEmpty) {
+      setState(() {
+        widget.data[widget.batch]['plato'].add({
+          'value': value,
+          'date': DateFormat('MM-dd HH:mm').format(DateTime.now()),
+        });
+        _parsePlatoEntries(); // 캐시 갱신
+      });
+      widget.saveData();
+      platoController.clear();
+      _calculatePredictedFG();
+      logDebug('Saved Plato value: $value');
+    }
+  }
+
+  void _confirmDeletePlato(int index) {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Confirm Deletion'),
+        content: const Text('Are you sure you want to delete this Plato entry?'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Cancel')),
+          TextButton(
+              onPressed: () {
+                Navigator.pop(context);
+                setState(() {
+                  widget.data[widget.batch]['plato'].removeAt(index);
+                  _parsePlatoEntries();
+                });
+                widget.saveData();
+                _calculatePredictedFG();
+                logDebug('Deleted Plato entry at index: $index');
+              },
+              child: const Text('Delete')),
+        ],
+      ),
+    );
+  }
+
+  void _editPlato(int index) {
+    final valueController = TextEditingController(
+      text: widget.data[widget.batch]['plato'][index]['value'],
+    );
+    DateTime selectedDate;
+    try {
+      selectedDate = DateFormat('MM-dd HH:mm')
+          .parse(widget.data[widget.batch]['plato'][index]['date']);
+      selectedDate = DateTime(
+        DateTime.now().year,
+        selectedDate.month,
+        selectedDate.day,
+        selectedDate.hour,
+        selectedDate.minute,
+      );
+    } catch (e) {
+      selectedDate = DateTime.now();
+      logDebug('Error parsing date for edit: $e');
+    }
+    showDialog(
+      context: context,
+      builder: (context) {
+        return StatefulBuilder(builder: (context, setStateDialog) {
+          return AlertDialog(
+            title: const Text('Edit Plato'),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextField(
+                  controller: valueController,
+                  decoration: const InputDecoration(labelText: 'Plato Value'),
+                ),
+                const SizedBox(height: 10),
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                          'Date: ${DateFormat('MM-dd HH:mm').format(selectedDate)}'),
+                    ),
+                    IconButton(
+                        icon: const Icon(Icons.calendar_today),
+                        onPressed: () async {
+                          DateTime? pickedDate = await showDatePicker(
+                            context: context,
+                            initialDate: selectedDate,
+                            firstDate: DateTime(2000),
+                            lastDate: DateTime(2100),
+                          );
+                          if (pickedDate != null) {
+                            TimeOfDay? pickedTime = await showTimePicker(
+                              context: context,
+                              initialTime: TimeOfDay.fromDateTime(selectedDate),
+                            );
+                            if (pickedTime != null) {
+                              setStateDialog(() {
+                                selectedDate = DateTime(
+                                  pickedDate.year,
+                                  pickedDate.month,
+                                  pickedDate.day,
+                                  pickedTime.hour,
+                                  pickedTime.minute,
+                                );
+                              });
+                            }
+                          }
+                        }),
+                  ],
+                ),
+              ],
+            ),
+            actions: [
+              TextButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: const Text('Cancel')),
+              TextButton(
+                  onPressed: () {
+                    final newPlato = valueController.text.trim();
+                    if (newPlato.isNotEmpty) {
+                      setState(() {
+                        widget.data[widget.batch]['plato'][index]['value'] =
+                            newPlato;
+                        widget.data[widget.batch]['plato'][index]['date'] =
+                            DateFormat('MM-dd HH:mm').format(selectedDate);
+                        _parsePlatoEntries();
+                      });
+                      widget.saveData();
+                      Navigator.pop(context);
+                      _calculatePredictedFG();
+                      logDebug('Edited Plato entry at index: $index, new value: $newPlato');
+                    }
+                  },
+                  child: const Text('Save')),
+            ],
+          );
+        });
+      },
+    );
+  }
+
+  Widget _buildLineChart(List<ParsedPlatoEntry> parsedPlatoList) {
+    if (parsedPlatoList.isEmpty) {
+      return const Center(
+        child: Text('No plato values available to display chart'),
+      );
+    }
+    final List<FlSpot> spots = [];
+    final Map<double, String> dateLabels = {};
+    for (int i = 0; i < parsedPlatoList.length; i++) {
+      final point = parsedPlatoList[i];
+      final displayValue = widget.showPlato ? point.value : platoToSG(point.value);
+      spots.add(FlSpot(i.toDouble(), displayValue));
+      dateLabels[i.toDouble()] = point.rawDate;
+    }
+    double minY = spots.map((s) => s.y).reduce(math.min);
+    double maxY = spots.map((s) => s.y).reduce(math.max);
+    if (minY == maxY) {
+      minY -= 1;
+      maxY += 1;
+    }
+    double? initialPlato = parsedPlatoList.isNotEmpty ? parsedPlatoList.first.value : null;
+    return Padding(
+      padding: const EdgeInsets.all(8.0),
+      child: LineChart(
+        LineChartData(
+          clipData: FlClipData.all(),
+          minY: minY,
+          maxY: maxY,
+          gridData: FlGridData(show: true),
+          borderData: FlBorderData(show: true),
+          lineBarsData: [
+            LineChartBarData(
+              spots: spots,
+              isCurved: true,
+              barWidth: 3,
+              dotData: FlDotData(show: true),
+            ),
+          ],
+          titlesData: FlTitlesData(
+            bottomTitles: AxisTitles(
+              sideTitles: SideTitles(
+                showTitles: true,
+                reservedSize: 40,
+                interval: 1,
+                getTitlesWidget: (double value, TitleMeta meta) {
+                  final label = dateLabels[value];
+                  if (label == null) {
+                    return SideTitleWidget(meta: meta, child: const Text(''));
+                  }
+                  final parts = label.split(' ');
+                  final datePart = parts.isNotEmpty ? parts[0] : '';
+                  final timePart = parts.length > 1 ? parts[1] : '';
+                  return SideTitleWidget(
+                    meta: meta,
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(datePart, style: const TextStyle(fontSize: 10)),
+                        Text(timePart, style: const TextStyle(fontSize: 10)),
+                      ],
+                    ),
+                  );
+                },
+              ),
+            ),
+            leftTitles: AxisTitles(
+              sideTitles: SideTitles(
+                showTitles: true,
+                reservedSize: 45,
+                interval: (maxY - minY) / 5,
+                getTitlesWidget: (double value, TitleMeta meta) {
+                  return SideTitleWidget(
+                    meta: meta,
+                    child: Text(
+                      value.toStringAsFixed(widget.showPlato ? 0 : 3),
+                      style: const TextStyle(fontSize: 10),
+                    ),
+                  );
+                },
+              ),
+              axisNameWidget: Text(widget.showPlato ? "Plato" : "SG"),
+              axisNameSize: 30,
+            ),
+            topTitles: AxisTitles(
+              sideTitles: SideTitles(showTitles: false),
+            ),
+            rightTitles: AxisTitles(
+              sideTitles: SideTitles(
+                showTitles: true,
+                reservedSize: 45,
+                interval: (maxY - minY) / 5,
+                getTitlesWidget: (double value, TitleMeta meta) {
+                  if (initialPlato == null) {
+                    return SideTitleWidget(meta: meta, child: const Text(''));
+                  }
+                  double abv;
+                  if (widget.showPlato) {
+                    abv = calculateABV(value, initialPlato);
+                  } else {
+                    abv = (platoToSG(initialPlato) - value) * 131.25;
+                  }
+                  return SideTitleWidget(
+                    meta: meta,
+                    child: Text('${abv.toStringAsFixed(1)}%', style: const TextStyle(fontSize: 10)),
+                  );
+                },
+              ),
+              axisNameWidget: const Text("ALC%"),
+              axisNameSize: 30,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final platoList = widget.data[widget.batch]['plato'] as List<dynamic>;
+    final estimatedALC =
+    (predictedFG != null && _cachedPlatoEntries != null && _cachedPlatoEntries!.isNotEmpty)
+        ? calculateABV(predictedFG!, _cachedPlatoEntries!.first.value)
+        : null;
+    return Scaffold(
+      appBar: AppBar(
+        title: Text('Plato for ${widget.batch}'),
+      ),
+      body: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.all(10),
+            child: Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: platoController,
+                    decoration: InputDecoration(
+                      hintText: widget.showPlato ? 'Enter Plato' : 'Enter SG',
+                    ),
+                    keyboardType: TextInputType.number,
+                    onSubmitted: (_) => _savePlato(),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                ElevatedButton(
+                  onPressed: _savePlato,
+                  child: const Text('Save'),
+                ),
+              ],
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+            child: Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: attenuationController,
+                    keyboardType: TextInputType.number,
+                    decoration: const InputDecoration(
+                      hintText: 'Enter Attenuation % (Example 80%)',
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      predictedFG != null
+                          ? (widget.showPlato
+                          ? 'Predicted FG (Plato): ${predictedFG!.toStringAsFixed(2)}'
+                          : 'Predicted FG (SG): ${platoToSG(predictedFG!).toStringAsFixed(3)}')
+                          : 'Predicted FG: -',
+                      style: const TextStyle(fontSize: 14),
+                    ),
+                    Text(
+                      estimatedALC != null
+                          ? 'Estimated ALC%: ${estimatedALC.toStringAsFixed(1)}%'
+                          : 'Estimated ALC%: -',
+                      style: const TextStyle(fontSize: 14),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+            child: Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: targetPlatoController,
+                    keyboardType: TextInputType.number,
+                    decoration: InputDecoration(
+                      hintText: widget.showPlato
+                          ? 'Enter target Plato (Example 10)'
+                          : 'Enter target SG (Example 1.050)',
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                ElevatedButton(
+                  onPressed: _predictTargetTime,
+                  child: const Text('Predict Target Time'),
+                ),
+              ],
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  predictionResult,
+                  style: const TextStyle(fontSize: 14, color: Colors.amber),
+                ),
+                if (predictedTime != null) ...[
+                  const SizedBox(height: 5),
+                  Row(
+                    children: [
+                      Checkbox(
+                        value: setReminder,
+                        onChanged: (bool? value) {
+                          setState(() {
+                            setReminder = value ?? false;
+                            if (setReminder && predictedTime != null) {
+                              // 리마인더 등록
+                              scheduleNotification(predictedTime!, widget.batch);
+                              addToCalendar(predictedTime!, widget.batch);
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(content: Text('Reminder and calendar event set!')),
+                              );
+                            } else {
+                              // 체크 해제 시 알림 취소
+                              flutterLocalNotificationsPlugin.cancel(0);
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(content: Text('Reminder cancelled.')),
+                              );
+                            }
+                          });
+                        },
+                      ),
+                      const Text(
+                        'Would you like a reminder for this time?',
+                        style: TextStyle(fontSize: 14, color: Colors.white70),
+                      ),
+                    ],
+                  ),
+                ],
+                const SizedBox(height: 5),
+                ElevatedButton(
+                  onPressed: () {
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (context) => BottlingCalculatorScreen(
+                          platoList: _cachedPlatoEntries ?? [],
+                          batch: widget.batch,
+                          data: widget.data,
+                          saveData: widget.saveData,
+                          showPlato: widget.showPlato,
+                        ),
+                      ),
+                    );
+                  },
+                  child: const Text('Calculate Bottling Time'),
+                ),
+              ],
+            ),
+          ),
+          Expanded(
+            child: _cachedPlatoEntries == null || _cachedPlatoEntries!.isEmpty
+                ? const Center(child: Text('No Plato entries.'))
+                : ListView.builder(
+              itemCount: _cachedPlatoEntries!.length,
+              itemBuilder: (context, index) {
+                final item = _cachedPlatoEntries![index];
+                return ListTile(
+                  title: Text('Plato: ${item.value} | ${item.rawDate}'),
+                  trailing: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      IconButton(
+                          icon: const Icon(Icons.edit),
+                          onPressed: () => _editPlato(index)),
+                      IconButton(
+                          icon: const Icon(Icons.delete),
+                          onPressed: () => _confirmDeletePlato(index)),
+                    ],
+                  ),
+                );
+              },
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.only(bottom: 16),
+            child: SizedBox(
+              height: 220,
+              child: _buildLineChart(_cachedPlatoEntries ?? []),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ------------------- BottlingCalculatorScreen -------------------
+class BottlingCalculatorScreen extends StatefulWidget {
+  final List<ParsedPlatoEntry> platoList;
+  final String batch;
+  final Map<String, dynamic> data;
+  final VoidCallback saveData;
+  final bool showPlato;
+
+  const BottlingCalculatorScreen({
+    Key? key,
+    required this.platoList,
+    required this.batch,
+    required this.data,
+    required this.saveData,
+    required this.showPlato,
+  }) : super(key: key);
+
+  @override
+  _BottlingCalculatorScreenState createState() => _BottlingCalculatorScreenState();
+}
+
+class _BottlingCalculatorScreenState extends State<BottlingCalculatorScreen> {
+  // 추가: 리마인더 체크박스의 상태를 관리하는 변수
+  bool bottlingReminderSet = false;
+
+  final TextEditingController targetCO2Controller = TextEditingController(text: "5.5");
+  String bottlingRecommendation = "";
+  DateTime? predictedBottlingTime;
+
+  @override
+  void initState() {
+    super.initState();
+    requestNotificationPermissions();
+  }
+
+  @override
+  void dispose() {
+    targetCO2Controller.dispose();
+    super.dispose();
+  }
+
+  Map<String, double>? _fitExponentialDecayModel() {
+    if (widget.platoList.length < 2) {
+      logDebug('Insufficient data for exponential decay model in BottlingCalculator');
+      return null;
+    }
+    final baseTime = widget.platoList.first.date;
+    final List<double> t = [];
+    final List<double> y = [];
+    for (var entry in widget.platoList) {
+      t.add(entry.date.difference(baseTime).inMinutes.toDouble());
+      y.add(entry.value);
+    }
+    double X0 = y.first;
+    double Xinf = 0;
+    if (X0 == Xinf) {
+      logDebug('X0 equals Xinf in BottlingCalculator');
+      return null;
+    }
+    final List<double> lnTerms = [];
+    final List<double> filteredT = [];
+    for (int i = 0; i < t.length; i++) {
+      double numerator = y[i] - Xinf;
+      double denominator = X0 - Xinf;
+      if (numerator > 0 && denominator > 0) {
+        lnTerms.add(math.log(numerator / denominator));
+        filteredT.add(t[i]);
+      }
+    }
+    if (lnTerms.isEmpty) {
+      logDebug('No valid data points for logarithmic computation in BottlingCalculator');
+      return null;
+    }
+    double k;
+    if (lnTerms.length == 1) {
+      k = 0.01;
+      logDebug('Using default k=0.01 in BottlingCalculator');
+    } else {
+      final n = filteredT.length;
+      final sumT = filteredT.reduce((a, b) => a + b);
+      final sumLn = lnTerms.reduce((a, b) => a + b);
+      final sumT2 = filteredT.fold(0.0, (double sum, double ti) => sum + ti * ti);
+      final sumTLn = filteredT.asMap().entries.fold(0.0, (double sum, MapEntry<int, double> entry) => sum + entry.value * lnTerms[entry.key]);
+      final denom = n * sumT2 - sumT * sumT;
+      if (denom == 0) {
+        logDebug('Denominator is zero in BottlingCalculator');
+        return null;
+      }
+      k = -(n * sumTLn - sumT * sumLn) / denom;
+    }
+    return {
+      "X0": X0,
+      "Xinf": Xinf,
+      "k": k,
+      "baseTime": baseTime.millisecondsSinceEpoch.toDouble(),
+    };
+  }
+
+  void _calculateBottlingTime() {
+    if (widget.platoList.isEmpty) {
+      setState(() {
+        bottlingRecommendation = "No Plato data available.";
+        predictedBottlingTime = null;
+      });
+      return;
+    }
+    double currentPlato = widget.platoList.last.value;
+    double targetCO2 = double.tryParse(targetCO2Controller.text) ?? 5.5;
+    if (targetCO2 <= 0) {
+      setState(() {
+        bottlingRecommendation = "Target CO2 must be a positive number.";
+        predictedBottlingTime = null;
+      });
+      logDebug('Invalid target CO2: $targetCO2');
+      return;
+    }
+    const double co2PerPlato = 5.81;
+    double deltaPlato = targetCO2 / co2PerPlato;
+    double targetPlato = currentPlato - deltaPlato;
+    if (targetPlato <= 0) {
+      setState(() {
+        bottlingRecommendation = "Target CO2 ($targetCO2 g/L) is too high to achieve with remaining fermentation.";
+        predictedBottlingTime = null;
+      });
+      logDebug('Target Plato below zero: $targetPlato');
+      return;
+    }
+    final params = _fitExponentialDecayModel();
+    if (params == null) {
+      setState(() {
+        bottlingRecommendation = "Unable to predict bottling time due to insufficient data.";
+        predictedBottlingTime = null;
+      });
+      return;
+    }
+    double X0 = params["X0"]!;
+    double Xinf = params["Xinf"]!;
+    double k = params["k"]!;
+    double baseTimeEpoch = params["baseTime"]!;
+    if (k <= 0 || X0 <= Xinf) {
+      setState(() {
+        bottlingRecommendation = "Invalid data for prediction.";
+        predictedBottlingTime = null;
+      });
+      logDebug('Invalid data for prediction: k=$k, X0=$X0, Xinf=$Xinf');
+      return;
+    }
+    final ratio = (targetPlato - Xinf) / (X0 - Xinf);
+    if (ratio <= 0 || ratio.isNaN || ratio.isInfinite) {
+      setState(() {
+        bottlingRecommendation = "Target Plato ($targetPlato) is below the expected final value ($Xinf).";
+        predictedBottlingTime = null;
+      });
+      logDebug('Invalid ratio in BottlingCalculator: $ratio');
+      return;
+    }
+    double t = -1 / k * math.log(ratio);
+    DateTime baseTime = DateTime.fromMillisecondsSinceEpoch(baseTimeEpoch.toInt());
+    DateTime predicted = baseTime.add(Duration(minutes: t.round()));
+    setState(() {
+      predictedBottlingTime = predicted;
+      bottlingRecommendation =
+      "Bottle when ${widget.showPlato ? "Plato" : "SG"} reaches ${targetPlato.toStringAsFixed(2)} (around ${DateFormat('MM-dd HH:mm').format(predicted)}) to achieve approximately ${targetCO2.toStringAsFixed(1)} g/L of CO₂.";
+    });
+    logDebug('Bottling recommendation: $bottlingRecommendation');
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: Text('Bottling Calculator for ${widget.batch}'),
+      ),
+      body: Padding(
+        padding: const EdgeInsets.all(10),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              widget.platoList.isNotEmpty
+                  ? (widget.showPlato
+                  ? 'Current Plato: ${widget.platoList.last.value}'
+                  : 'Current SG: ${platoToSG(widget.platoList.last.value).toStringAsFixed(3)}')
+                  : 'Current value: N/A',
+              style: const TextStyle(fontSize: 16),
+            ),
+            const SizedBox(height: 10),
+            Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: targetCO2Controller,
+                    keyboardType: TextInputType.number,
+                    decoration: const InputDecoration(
+                      hintText: 'Enter target CO₂ g/L (e.g., 5.5)',
+                      labelText: 'Target CO₂ (g/L)',
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                ElevatedButton(
+                  onPressed: _calculateBottlingTime,
+                  child: const Text('Calculate'),
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            Text(
+              bottlingRecommendation,
+              style: const TextStyle(fontSize: 14, color: Colors.amber),
+            ),
+            if (predictedBottlingTime != null) ...[
+              const SizedBox(height: 5),
+              Row(
+                children: [
+                  Checkbox(
+                    value: bottlingReminderSet,
+                    onChanged: (bool? value) {
+                      setState(() {
+                        bottlingReminderSet = value ?? false;
+                        if (bottlingReminderSet && predictedBottlingTime != null) {
+                          scheduleNotification(predictedBottlingTime!, widget.batch);
+                          addToCalendar(predictedBottlingTime!, widget.batch);
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(
+                              content: Text('Reminder and calendar event set for bottling time!'),
+                            ),
+                          );
+                        } else {
+                          flutterLocalNotificationsPlugin.cancel(0);
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(content: Text('Bottling reminder cancelled.')),
+                          );
+                        }
+                      });
+                    },
+                  ),
+                  const Text(
+                    'Set reminder for bottling time?',
+                    style: TextStyle(fontSize: 14, color: Colors.white70),
+                  ),
+                ],
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
