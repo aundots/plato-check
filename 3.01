@@ -1,99 +1,19 @@
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:intl/intl.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:fl_chart/fl_chart.dart';
-import 'package:flutter_local_notifications/flutter_local_notifications.dart';
-import 'package:add_2_calendar/add_2_calendar.dart';
 
-// ------------------- GLOBAL VARIABLES & HELPER FUNCTIONS -------------------
-bool enableDebugLogs = true;
-void logDebug(String message) {
-  if (enableDebugLogs) {
-    debugPrint('[DEBUG] $message');
-  }
-}
-
-double platoToSG(double plato) {
-  return 1 + (plato / (258.6 - ((plato / 258.2) * 227.1)));
-}
-
-double sgToPlato(double sg) {
-  return (258.6 * (sg - 1)) / (1 + ((sg - 1) * 227.1 / 258.2));
-}
-
-FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin =
-FlutterLocalNotificationsPlugin();
-
-// ------------------- MAIN ENTRY -------------------
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  const AndroidInitializationSettings initializationSettingsAndroid =
-  AndroidInitializationSettings('@mipmap/ic_launcher');
-  const DarwinInitializationSettings initializationSettingsIOS =
-  DarwinInitializationSettings(
-    requestAlertPermission: true,
-    requestBadgePermission: true,
-    requestSoundPermission: true,
-  );
-  const InitializationSettings initializationSettings = InitializationSettings(
-    android: initializationSettingsAndroid,
-    iOS: initializationSettingsIOS,
-  );
-  await flutterLocalNotificationsPlugin.initialize(initializationSettings);
   runApp(const BatchApp());
 }
 
-// ------------------- NOTIFICATIONS & CALENDAR -------------------
-Future<void> scheduleNotification(DateTime scheduledTime, String batch) async {
-  // androidScheduleMode 파라미터 제거(최신 플러그인 기준)
-  const NotificationDetails platformChannelSpecifics = NotificationDetails(
-    android: AndroidNotificationDetails(
-      'batch_tracker_channel',
-      'Batch Tracker Notifications',
-      channelDescription: 'Notifications for Batch Tracker app',
-      importance: Importance.max,
-      priority: Priority.high,
-    ),
-    iOS: DarwinNotificationDetails(),
-  );
-
-  await flutterLocalNotificationsPlugin.schedule(
-    0,
-    'Batch Tracker Reminder',
-    'Target Plato reached for batch $batch!',
-    scheduledTime,
-    platformChannelSpecifics,
-    payload: batch,
-  );
-}
-
-Future<void> requestNotificationPermissions() async {
-  if (Platform.isIOS) {
-    await flutterLocalNotificationsPlugin
-        .resolvePlatformSpecificImplementation<IOSFlutterLocalNotificationsPlugin>()
-        ?.requestPermissions(alert: true, badge: true, sound: true);
-  }
-  // Android의 경우, 최신 버전에서는 별도 권한 요청 필요 없음.
-}
-
-void addToCalendar(DateTime eventTime, String batch) {
-  final Event event = Event(
-    title: 'Batch Tracker: Target Plato Reached',
-    description: 'Target Plato reached for batch $batch',
-    startDate: eventTime,
-    endDate: eventTime.add(const Duration(minutes: 30)),
-    iosParams: const IOSParams(reminder: Duration(minutes: 15)),
-    androidParams: const AndroidParams(emailInvites: []),
-  );
-  Add2Calendar.addEvent2Cal(event);
-}
-
-// ------------------- APP UI -------------------
 class BatchApp extends StatelessWidget {
   const BatchApp({Key? key}) : super(key: key);
 
@@ -110,6 +30,8 @@ class BatchApp extends StatelessWidget {
   }
 }
 
+/// BatchListScreen: 배치 추가, 삭제, 편집 및 CSV 내보내기 화면
+/// AppBar 오른쪽 액션영역에 Plato/SG 토글 버튼이 CSV 공유 버튼 바로 왼쪽에 위치함.
 class BatchListScreen extends StatefulWidget {
   const BatchListScreen({Key? key}) : super(key: key);
 
@@ -120,8 +42,9 @@ class BatchListScreen extends StatefulWidget {
 class _BatchListScreenState extends State<BatchListScreen> {
   Map<String, dynamic> data = {};
   final TextEditingController batchController = TextEditingController();
+
+  // BatchList 화면에서 Plato/SG 토글 상태 관리 (true: Plato, false: SG)
   bool showPlato = true;
-  bool _dataChanged = false; // 데이터 변경 여부 플래그
 
   @override
   void initState() {
@@ -139,31 +62,19 @@ class _BatchListScreenState extends State<BatchListScreen> {
       final file = await _localFile;
       if (await file.exists()) {
         final content = await file.readAsString();
-        setState(() {
-          data = json.decode(content);
-          _dataChanged = false;
-        });
-        logDebug('Data loaded successfully: ${data.keys.length} batches');
+        setState(() => data = json.decode(content));
       }
     } catch (e) {
-      logDebug('Error loading data: $e');
       ScaffoldMessenger.of(context)
           .showSnackBar(SnackBar(content: Text('Error loading data: $e')));
     }
   }
 
   Future<void> _saveData() async {
-    if (!_dataChanged) {
-      logDebug('No data changes to save');
-      return;
-    }
     try {
       final file = await _localFile;
       await file.writeAsString(json.encode(data));
-      _dataChanged = false;
-      logDebug('Data saved successfully');
     } catch (e) {
-      logDebug('Error saving data: $e');
       ScaffoldMessenger.of(context)
           .showSnackBar(SnackBar(content: Text('Error saving data: $e')));
     }
@@ -198,11 +109,9 @@ class _BatchListScreenState extends State<BatchListScreen> {
           'date': DateFormat('MM-dd HH:mm').format(DateTime.now()),
           'plato': <Map<String, String>>[],
         };
-        _dataChanged = true;
       });
       _saveData();
       batchController.clear();
-      logDebug('Added batch: $batch');
     }
   }
 
@@ -219,12 +128,8 @@ class _BatchListScreenState extends State<BatchListScreen> {
           TextButton(
               onPressed: () {
                 Navigator.pop(context);
-                setState(() {
-                  data.remove(batch);
-                  _dataChanged = true;
-                });
+                setState(() => data.remove(batch));
                 _saveData();
-                logDebug('Deleted batch: $batch');
               },
               child: const Text('Delete')),
         ],
@@ -245,7 +150,6 @@ class _BatchListScreenState extends State<BatchListScreen> {
           selectedDate.minute);
     } catch (e) {
       selectedDate = DateTime.now();
-      logDebug('Error parsing batch date: $e');
     }
     showDialog(
       context: context,
@@ -313,11 +217,9 @@ class _BatchListScreenState extends State<BatchListScreen> {
                         temp['date'] =
                             DateFormat('MM-dd HH:mm').format(selectedDate);
                         data[newName] = temp;
-                        _dataChanged = true;
                       });
                       _saveData();
                       Navigator.pop(context);
-                      logDebug('Edited batch: $oldBatch to $newName');
                     }
                   },
                   child: const Text('Save')),
@@ -358,9 +260,13 @@ class _BatchListScreenState extends State<BatchListScreen> {
   void _launchEinGlas() async {
     final url = Uri.parse('https://ein-glas.com');
     if (!await launchUrl(url, mode: LaunchMode.externalApplication)) {
-      logDebug('Could not launch URL: $url');
       throw 'Could not launch $url';
     }
+  }
+
+  // Plato를 SG로 변환 (Balling 공식 참고)
+  double platoToSG(double plato) {
+    return 1 + (plato / (258.6 - ((plato / 258.2) * 227.1)));
   }
 
   @override
@@ -370,6 +276,7 @@ class _BatchListScreenState extends State<BatchListScreen> {
       appBar: AppBar(
         title: const Text('Batch List'),
         actions: [
+          // Plato/SG 토글 버튼을 CSV 공유 버튼 바로 왼쪽에 배치함.
           ToggleButtons(
             borderRadius: BorderRadius.circular(8),
             children: const [
@@ -397,6 +304,7 @@ class _BatchListScreenState extends State<BatchListScreen> {
         children: [
           Column(
             children: [
+              // 배치 추가 입력 필드와 버튼
               Padding(
                 padding: const EdgeInsets.all(10),
                 child: Row(
@@ -416,6 +324,7 @@ class _BatchListScreenState extends State<BatchListScreen> {
                   ],
                 ),
               ),
+              // 배치 목록 ListView
               Expanded(
                 child: batchList.isEmpty
                     ? const Center(
@@ -434,8 +343,7 @@ class _BatchListScreenState extends State<BatchListScreen> {
                         subtitle =
                         'Latest Plato: ${latest['value']} at ${latest['date']}';
                       } else {
-                        double platoVal =
-                            double.tryParse(latest['value']) ?? 0;
+                        double platoVal = double.tryParse(latest['value']) ?? 0;
                         double sg = platoToSG(platoVal);
                         subtitle =
                         'Latest SG: ${sg.toStringAsFixed(3)} at ${latest['date']}';
@@ -479,6 +387,7 @@ class _BatchListScreenState extends State<BatchListScreen> {
               const SizedBox(height: 60),
             ],
           ),
+          // 하단 영역: Feedback 버튼, 로고, 제작자 정보
           Positioned(
             bottom: 10,
             left: 20,
@@ -522,23 +431,15 @@ class _BatchListScreenState extends State<BatchListScreen> {
   }
 }
 
-// ------------------- PlatoScreen -------------------
-class ParsedPlatoEntry {
-  final double value;
-  final DateTime date;
-  final String rawDate;
-  ParsedPlatoEntry({
-    required this.value,
-    required this.date,
-    required this.rawDate,
-  });
-}
-
+/// PlatoScreen: Plato(또는 SG) 입력/관리, 예측 및 차트 표시 화면
+/// "fermentation%" 대신 "Attenuation %"라는 변수명과 힌트 텍스트를 사용하며,
+/// 토글 상태(showPlato)에 따라 입력 필드의 예시문이 동적으로 변경됨.
 class PlatoScreen extends StatefulWidget {
   final String batch;
   final Map<String, dynamic> data;
   final VoidCallback saveData;
-  final bool showPlato;
+  final bool showPlato; // BatchList에서 전달받은 토글 상태
+
   const PlatoScreen({
     Key? key,
     required this.batch,
@@ -555,18 +456,14 @@ class _PlatoScreenState extends State<PlatoScreen> {
   final TextEditingController platoController = TextEditingController();
   final TextEditingController attenuationController = TextEditingController();
   final TextEditingController targetPlatoController = TextEditingController();
-  double? predictedFG;
+
+  double? predictedFG; // 예측 최종 FG (Plato 단위)
   String predictionResult = "";
-  DateTime? predictedTime;
-  bool setReminder = false;
-  List<ParsedPlatoEntry>? _cachedPlatoEntries; // 캐싱된 Plato 데이터
 
   @override
   void initState() {
     super.initState();
-    _parsePlatoEntries();
     attenuationController.addListener(_calculatePredictedFG);
-    requestNotificationPermissions();
   }
 
   @override
@@ -577,78 +474,72 @@ class _PlatoScreenState extends State<PlatoScreen> {
     super.dispose();
   }
 
-  void _parsePlatoEntries() {
-    final platoList = widget.data[widget.batch]['plato'] as List<dynamic>;
-    final format = DateFormat('MM-dd HH:mm');
-    _cachedPlatoEntries = platoList.map((entry) {
-      try {
-        final date = format.parse(entry['date']);
-        final value = double.tryParse(entry['value']) ?? 0;
-        return ParsedPlatoEntry(
-          value: value,
-          date: date,
-          rawDate: entry['date'],
-        );
-      } catch (e) {
-        logDebug('Error parsing Plato entry: $e');
-        return ParsedPlatoEntry(
-          value: 0,
-          date: DateTime.now(),
-          rawDate: entry['date'],
-        );
-      }
-    }).toList();
-    logDebug('Parsed ${_cachedPlatoEntries?.length} Plato entries');
+  /// Balling 공식: Plato를 SG로 변환 (대략적 계산)
+  double platoToSG(double plato) {
+    return 1 + (plato / (258.6 - ((plato / 258.2) * 227.1)));
   }
 
+  /// ABV 계산: (OG - SG) * 131.25
   double calculateABV(double currentPlato, double initialPlato) {
     final og = platoToSG(initialPlato);
     final sg = platoToSG(currentPlato);
     return (og - sg) * 131.25;
   }
 
+  /// Attenuation % 입력에 따른 예측 FG 재계산 (Plato 단위)
   void _calculatePredictedFG() {
-    if (_cachedPlatoEntries == null || _cachedPlatoEntries!.isEmpty) {
-      setState(() {
-        predictedFG = null;
-      });
-      return;
-    }
-    final initialPlato = _cachedPlatoEntries!.first.value;
-    final attenuationPercent = double.tryParse(attenuationController.text);
-    if (attenuationPercent != null) {
-      setState(() {
-        predictedFG = initialPlato * (1 - attenuationPercent / 100);
-      });
-      logDebug('Predicted FG: $predictedFG with attenuation: $attenuationPercent%');
+    final platoEntries = widget.data[widget.batch]['plato'];
+    if (platoEntries.isNotEmpty && attenuationController.text.isNotEmpty) {
+      final initialPlato =
+      double.tryParse(widget.data[widget.batch]['plato'][0]['value']);
+      final attenuationPercent = double.tryParse(attenuationController.text);
+      if (initialPlato != null && attenuationPercent != null) {
+        setState(() {
+          predictedFG = initialPlato * (1 - attenuationPercent / 100);
+        });
+      }
     } else {
       setState(() {
         predictedFG = null;
       });
-      logDebug('Attenuation percent is invalid');
     }
   }
 
   Map<String, double>? _fitExponentialDecayModel() {
-    if (_cachedPlatoEntries == null || _cachedPlatoEntries!.length < 2) {
-      logDebug('Insufficient data for exponential decay model');
+    List<dynamic> list = widget.data[widget.batch]['plato'];
+    if (list.length < 2) return null;
+
+    List<double> t = [];
+    List<double> y = [];
+    DateFormat format = DateFormat('MM-dd HH:mm');
+    DateTime baseTime;
+
+    try {
+      baseTime = format.parse(list[0]['date']);
+      baseTime = DateTime(
+          baseTime.year, baseTime.month, baseTime.day, baseTime.hour, baseTime.minute);
+    } catch (e) {
       return null;
     }
-    final baseTime = _cachedPlatoEntries!.first.date;
-    final List<double> t = [];
-    final List<double> y = [];
-    for (var entry in _cachedPlatoEntries!) {
-      t.add(entry.date.difference(baseTime).inMinutes.toDouble());
-      y.add(entry.value);
+
+    for (var entry in list) {
+      try {
+        DateTime dt = format.parse(entry['date']);
+        dt = DateTime(dt.year, dt.month, dt.day, dt.hour, dt.minute);
+        t.add(dt.difference(baseTime).inMinutes.toDouble());
+        y.add(double.tryParse(entry['value']) ?? 0);
+      } catch (_) {}
     }
+
+    if (t.length < 2) return null;
+
     double X0 = y.first;
-    double Xinf = 0;
-    if (X0 == Xinf) {
-      logDebug('X0 equals Xinf, cannot compute decay');
-      return null;
-    }
-    final List<double> lnTerms = [];
-    final List<double> filteredT = [];
+    double Xinf = 0; // Xinf를 0으로 고정 (도메인 지식에 따라 조정 가능)
+    if (X0 == Xinf) return null;
+
+    List<double> lnTerms = [];
+    List<double> filteredT = [];
+
     for (int i = 0; i < t.length; i++) {
       double numerator = y[i] - Xinf;
       double denominator = X0 - Xinf;
@@ -657,27 +548,26 @@ class _PlatoScreenState extends State<PlatoScreen> {
         filteredT.add(t[i]);
       }
     }
-    if (lnTerms.isEmpty) {
-      logDebug('No valid data points for logarithmic computation');
-      return null;
-    }
+
+    if (lnTerms.isEmpty) return null;
+
     double k;
     if (lnTerms.length == 1) {
-      k = 0.01;
-      logDebug('Using default k=0.01 due to single data point');
+      k = 0.01; // 기본값 설정
     } else {
-      final n = filteredT.length;
-      final sumT = filteredT.reduce((a, b) => a + b);
-      final sumLn = lnTerms.reduce((a, b) => a + b);
-      final sumT2 = filteredT.fold(0.0, (double sum, double ti) => sum + ti * ti);
-      final sumTLn = filteredT.asMap().entries.fold(0.0, (double sum, MapEntry<int, double> entry) => sum + entry.value * lnTerms[entry.key]);
-      final denom = n * sumT2 - sumT * sumT;
-      if (denom == 0) {
-        logDebug('Denominator is zero in decay rate calculation');
-        return null;
+      double sumT = filteredT.reduce((a, b) => a + b);
+      double sumLn = lnTerms.reduce((a, b) => a + b);
+      double sumT2 = filteredT.map((ti) => ti * ti).reduce((a, b) => a + b);
+      double sumTLn = 0;
+      for (int i = 0; i < filteredT.length; i++) {
+        sumTLn += filteredT[i] * lnTerms[i];
       }
-      k = -(n * sumTLn - sumT * sumLn) / denom;
+      int n = filteredT.length;
+      double denominator = n * sumT2 - sumT * sumT;
+      if (denominator == 0) return null;
+      k = -(n * sumTLn - sumT * sumLn) / denominator;
     }
+
     return {
       "X0": X0,
       "Xinf": Xinf,
@@ -690,80 +580,69 @@ class _PlatoScreenState extends State<PlatoScreen> {
     final params = _fitExponentialDecayModel();
     if (params == null) {
       setState(() {
-        predictionResult =
-        "Prediction unavailable due to insufficient or inconsistent data.";
-        predictedTime = null;
-        setReminder = false;
+        predictionResult = "Prediction unavailable due to insufficient or inconsistent data.";
       });
       return;
     }
+
     double X0 = params["X0"]!;
     double Xinf = params["Xinf"]!;
     double k = params["k"]!;
     double baseTimeEpoch = params["baseTime"]!;
     double? target = double.tryParse(targetPlatoController.text);
+
+    // 입력값 검증
     if (target == null || target <= 0) {
       setState(() {
         predictionResult = "Target value must be a positive number.";
-        predictedTime = null;
-        setReminder = false;
       });
-      logDebug('Invalid target value: $target');
       return;
     }
-    if (!widget.showPlato) {
-      // SG 입력 시 SG → Plato 변환
-      target = sgToPlato(target);
-    }
+
+    // 데이터 추세 검증
     if (X0 <= Xinf) {
       setState(() {
-        predictionResult =
-        "Data does not show a decreasing trend, exponential decay model is not applicable.";
-        predictedTime = null;
-        setReminder = false;
+        predictionResult = "Data does not show a decreasing trend, exponential decay model is not applicable.";
       });
-      logDebug('No decreasing trend: X0=$X0, Xinf=$Xinf');
       return;
     }
+
+    // 감쇠 상수 검증
     if (k <= 0) {
       setState(() {
         predictionResult = "Invalid decay rate, unable to predict.";
-        predictedTime = null;
-        setReminder = false;
       });
-      logDebug('Invalid decay rate: k=$k');
       return;
     }
+
+    // 타겟 값 범위 검증
     if (target >= X0) {
       setState(() {
-        predictionResult =
-        "Target value ($target) cannot be greater than or equal to the initial ${widget.showPlato ? "Plato" : "SG"} value ($X0).";
-        predictedTime = null;
-        setReminder = false;
+        predictionResult = "Target value ($target) cannot be greater than or equal to the initial Plato value ($X0).";
       });
-      logDebug('Target exceeds initial value: target=$target, X0=$X0');
       return;
     }
+
     final ratio = (target - Xinf) / (X0 - Xinf);
+
     if (ratio <= 0 || ratio.isNaN || ratio.isInfinite) {
       setState(() {
-        predictionResult =
-        "Target value ($target) is below the expected final value ($Xinf). Prediction may be inaccurate.";
+        predictionResult = "Target value ($target) is below the expected final value ($Xinf). Prediction may be inaccurate.";
       });
-      logDebug('Invalid ratio: $ratio');
     }
+
     double t = -1 / k * math.log(ratio);
+
     DateTime baseTime = DateTime.fromMillisecondsSinceEpoch(baseTimeEpoch.toInt());
-    DateTime predicted = baseTime.add(Duration(minutes: t.round()));
+    DateTime predictedTime = baseTime.add(Duration(minutes: t.round()));
+
     setState(() {
-      predictedTime = predicted;
-      predictionResult =
-      "Estimated target reached at: ${DateFormat('MM-dd HH:mm').format(predicted)}";
-      setReminder = false;
+      predictionResult = "Estimated target reached at: ${DateFormat('MM-dd HH:mm').format(predictedTime)}";
     });
-    logDebug('Prediction successful: $predictionResult');
   }
 
+  /// Plato(또는 SG) 값을 입력하여 데이터에 추가함.
+  /// 입력 필드의 힌트 텍스트는 토글 상태(widget.showPlato)에 따라 동적으로 표시됨.
   void _savePlato() {
     final value = platoController.text.trim();
     if (value.isNotEmpty) {
@@ -772,12 +651,10 @@ class _PlatoScreenState extends State<PlatoScreen> {
           'value': value,
           'date': DateFormat('MM-dd HH:mm').format(DateTime.now()),
         });
-        _parsePlatoEntries(); // 캐시 갱신
       });
       widget.saveData();
       platoController.clear();
       _calculatePredictedFG();
-      logDebug('Saved Plato value: $value');
     }
   }
 
@@ -794,13 +671,9 @@ class _PlatoScreenState extends State<PlatoScreen> {
           TextButton(
               onPressed: () {
                 Navigator.pop(context);
-                setState(() {
-                  widget.data[widget.batch]['plato'].removeAt(index);
-                  _parsePlatoEntries();
-                });
+                setState(() => widget.data[widget.batch]['plato'].removeAt(index));
                 widget.saveData();
                 _calculatePredictedFG();
-                logDebug('Deleted Plato entry at index: $index');
               },
               child: const Text('Delete')),
         ],
@@ -825,7 +698,6 @@ class _PlatoScreenState extends State<PlatoScreen> {
       );
     } catch (e) {
       selectedDate = DateTime.now();
-      logDebug('Error parsing date for edit: $e');
     }
     showDialog(
       context: context,
@@ -891,12 +763,10 @@ class _PlatoScreenState extends State<PlatoScreen> {
                             newPlato;
                         widget.data[widget.batch]['plato'][index]['date'] =
                             DateFormat('MM-dd HH:mm').format(selectedDate);
-                        _parsePlatoEntries();
                       });
                       widget.saveData();
                       Navigator.pop(context);
                       _calculatePredictedFG();
-                      logDebug('Edited Plato entry at index: $index, new value: $newPlato');
                     }
                   },
                   child: const Text('Save')),
@@ -907,19 +777,22 @@ class _PlatoScreenState extends State<PlatoScreen> {
     );
   }
 
-  Widget _buildLineChart(List<ParsedPlatoEntry> parsedPlatoList) {
-    if (parsedPlatoList.isEmpty) {
+  /// 차트 위젯: 입력된 Plato(또는 SG) 값을 기반으로 선 그래프를 생성함.
+  /// 좌측 Y축은 토글 상태(widget.showPlato)에 따라 Plato 또는 SG, 우측 축은 계산된 ALC%를 표시함.
+  Widget _buildLineChart(List<dynamic> platoList) {
+    if (platoList.isEmpty) {
       return const Center(
         child: Text('No plato values available to display chart'),
       );
     }
     final List<FlSpot> spots = [];
     final Map<double, String> dateLabels = {};
-    for (int i = 0; i < parsedPlatoList.length; i++) {
-      final point = parsedPlatoList[i];
-      final displayValue = widget.showPlato ? point.value : platoToSG(point.value);
+    for (int i = 0; i < platoList.length; i++) {
+      final point = platoList[i];
+      final rawPlato = double.tryParse(point['value']) ?? 0;
+      final displayValue = widget.showPlato ? rawPlato : platoToSG(rawPlato);
       spots.add(FlSpot(i.toDouble(), displayValue));
-      dateLabels[i.toDouble()] = point.rawDate;
+      dateLabels[i.toDouble()] = point['date'];
     }
     double minY = spots.map((s) => s.y).reduce(math.min);
     double maxY = spots.map((s) => s.y).reduce(math.max);
@@ -927,7 +800,9 @@ class _PlatoScreenState extends State<PlatoScreen> {
       minY -= 1;
       maxY += 1;
     }
-    double? initialPlato = parsedPlatoList.isNotEmpty ? parsedPlatoList.first.value : null;
+    double? initialPlato = widget.data[widget.batch]['plato'].isNotEmpty
+        ? double.tryParse(widget.data[widget.batch]['plato'][0]['value'])
+        : null;
     return Padding(
       padding: const EdgeInsets.all(8.0),
       child: LineChart(
@@ -987,7 +862,7 @@ class _PlatoScreenState extends State<PlatoScreen> {
                   );
                 },
               ),
-              axisNameWidget: Text(widget.showPlato ? "Plato" : "SG"),
+              axisNameWidget: const Text("Plato"),
               axisNameSize: 30,
             ),
             topTitles: AxisTitles(
@@ -1027,8 +902,9 @@ class _PlatoScreenState extends State<PlatoScreen> {
   Widget build(BuildContext context) {
     final platoList = widget.data[widget.batch]['plato'] as List<dynamic>;
     final estimatedALC =
-    (predictedFG != null && _cachedPlatoEntries != null && _cachedPlatoEntries!.isNotEmpty)
-        ? calculateABV(predictedFG!, _cachedPlatoEntries!.first.value)
+    (predictedFG != null && widget.data[widget.batch]['plato'].isNotEmpty)
+        ? calculateABV(predictedFG!,
+        double.tryParse(widget.data[widget.batch]['plato'][0]['value']) ?? 0)
         : null;
     return Scaffold(
       appBar: AppBar(
@@ -1036,6 +912,7 @@ class _PlatoScreenState extends State<PlatoScreen> {
       ),
       body: Column(
         children: [
+          // 입력 Row: Plato(또는 SG) 값 입력 필드와 Save 버튼
           Padding(
             padding: const EdgeInsets.all(10),
             child: Row(
@@ -1058,6 +935,7 @@ class _PlatoScreenState extends State<PlatoScreen> {
               ],
             ),
           ),
+          // Attenuation % 입력과 예측 FG/Estimated ALC% 표시 Row
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
             child: Row(
@@ -1094,6 +972,7 @@ class _PlatoScreenState extends State<PlatoScreen> {
               ],
             ),
           ),
+          // 목표 값 입력 및 예측 버튼 Row
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
             child: Row(
@@ -1117,78 +996,24 @@ class _PlatoScreenState extends State<PlatoScreen> {
               ],
             ),
           ),
+          // 예측 결과 출력 영역
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  predictionResult,
-                  style: const TextStyle(fontSize: 14, color: Colors.amber),
-                ),
-                if (predictedTime != null) ...[
-                  const SizedBox(height: 5),
-                  Row(
-                    children: [
-                      Checkbox(
-                        value: setReminder,
-                        onChanged: (bool? value) {
-                          setState(() {
-                            setReminder = value ?? false;
-                            if (setReminder && predictedTime != null) {
-                              // 리마인더 등록
-                              scheduleNotification(predictedTime!, widget.batch);
-                              addToCalendar(predictedTime!, widget.batch);
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                const SnackBar(content: Text('Reminder and calendar event set!')),
-                              );
-                            } else {
-                              // 체크 해제 시 알림 취소
-                              flutterLocalNotificationsPlugin.cancel(0);
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                const SnackBar(content: Text('Reminder cancelled.')),
-                              );
-                            }
-                          });
-                        },
-                      ),
-                      const Text(
-                        'Would you like a reminder for this time?',
-                        style: TextStyle(fontSize: 14, color: Colors.white70),
-                      ),
-                    ],
-                  ),
-                ],
-                const SizedBox(height: 5),
-                ElevatedButton(
-                  onPressed: () {
-                    Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                        builder: (context) => BottlingCalculatorScreen(
-                          platoList: _cachedPlatoEntries ?? [],
-                          batch: widget.batch,
-                          data: widget.data,
-                          saveData: widget.saveData,
-                          showPlato: widget.showPlato,
-                        ),
-                      ),
-                    );
-                  },
-                  child: const Text('Calculate Bottling Time'),
-                ),
-              ],
+            child: Text(
+              predictionResult,
+              style: const TextStyle(fontSize: 14, color: Colors.amber),
             ),
           ),
+          // Plato 항목 목록
           Expanded(
-            child: _cachedPlatoEntries == null || _cachedPlatoEntries!.isEmpty
+            child: platoList.isEmpty
                 ? const Center(child: Text('No Plato entries.'))
                 : ListView.builder(
-              itemCount: _cachedPlatoEntries!.length,
+              itemCount: platoList.length,
               itemBuilder: (context, index) {
-                final item = _cachedPlatoEntries![index];
+                final item = platoList[index];
                 return ListTile(
-                  title: Text('Plato: ${item.value} | ${item.rawDate}'),
+                  title: Text('Plato: ${item['value']} | ${item['date']}'),
                   trailing: Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
@@ -1204,265 +1029,15 @@ class _PlatoScreenState extends State<PlatoScreen> {
               },
             ),
           ),
+          // 차트 영역
           Padding(
             padding: const EdgeInsets.only(bottom: 16),
-            child: SizedBox(
+            child: Container(
               height: 220,
-              child: _buildLineChart(_cachedPlatoEntries ?? []),
+              child: _buildLineChart(platoList),
             ),
           ),
         ],
-      ),
-    );
-  }
-}
-
-// ------------------- BottlingCalculatorScreen -------------------
-class BottlingCalculatorScreen extends StatefulWidget {
-  final List<ParsedPlatoEntry> platoList;
-  final String batch;
-  final Map<String, dynamic> data;
-  final VoidCallback saveData;
-  final bool showPlato;
-
-  const BottlingCalculatorScreen({
-    Key? key,
-    required this.platoList,
-    required this.batch,
-    required this.data,
-    required this.saveData,
-    required this.showPlato,
-  }) : super(key: key);
-
-  @override
-  _BottlingCalculatorScreenState createState() => _BottlingCalculatorScreenState();
-}
-
-class _BottlingCalculatorScreenState extends State<BottlingCalculatorScreen> {
-  // 추가: 리마인더 체크박스의 상태를 관리하는 변수
-  bool bottlingReminderSet = false;
-
-  final TextEditingController targetCO2Controller = TextEditingController(text: "5.5");
-  String bottlingRecommendation = "";
-  DateTime? predictedBottlingTime;
-
-  @override
-  void initState() {
-    super.initState();
-    requestNotificationPermissions();
-  }
-
-  @override
-  void dispose() {
-    targetCO2Controller.dispose();
-    super.dispose();
-  }
-
-  Map<String, double>? _fitExponentialDecayModel() {
-    if (widget.platoList.length < 2) {
-      logDebug('Insufficient data for exponential decay model in BottlingCalculator');
-      return null;
-    }
-    final baseTime = widget.platoList.first.date;
-    final List<double> t = [];
-    final List<double> y = [];
-    for (var entry in widget.platoList) {
-      t.add(entry.date.difference(baseTime).inMinutes.toDouble());
-      y.add(entry.value);
-    }
-    double X0 = y.first;
-    double Xinf = 0;
-    if (X0 == Xinf) {
-      logDebug('X0 equals Xinf in BottlingCalculator');
-      return null;
-    }
-    final List<double> lnTerms = [];
-    final List<double> filteredT = [];
-    for (int i = 0; i < t.length; i++) {
-      double numerator = y[i] - Xinf;
-      double denominator = X0 - Xinf;
-      if (numerator > 0 && denominator > 0) {
-        lnTerms.add(math.log(numerator / denominator));
-        filteredT.add(t[i]);
-      }
-    }
-    if (lnTerms.isEmpty) {
-      logDebug('No valid data points for logarithmic computation in BottlingCalculator');
-      return null;
-    }
-    double k;
-    if (lnTerms.length == 1) {
-      k = 0.01;
-      logDebug('Using default k=0.01 in BottlingCalculator');
-    } else {
-      final n = filteredT.length;
-      final sumT = filteredT.reduce((a, b) => a + b);
-      final sumLn = lnTerms.reduce((a, b) => a + b);
-      final sumT2 = filteredT.fold(0.0, (double sum, double ti) => sum + ti * ti);
-      final sumTLn = filteredT.asMap().entries.fold(0.0, (double sum, MapEntry<int, double> entry) => sum + entry.value * lnTerms[entry.key]);
-      final denom = n * sumT2 - sumT * sumT;
-      if (denom == 0) {
-        logDebug('Denominator is zero in BottlingCalculator');
-        return null;
-      }
-      k = -(n * sumTLn - sumT * sumLn) / denom;
-    }
-    return {
-      "X0": X0,
-      "Xinf": Xinf,
-      "k": k,
-      "baseTime": baseTime.millisecondsSinceEpoch.toDouble(),
-    };
-  }
-
-  void _calculateBottlingTime() {
-    if (widget.platoList.isEmpty) {
-      setState(() {
-        bottlingRecommendation = "No Plato data available.";
-        predictedBottlingTime = null;
-      });
-      return;
-    }
-    double currentPlato = widget.platoList.last.value;
-    double targetCO2 = double.tryParse(targetCO2Controller.text) ?? 5.5;
-    if (targetCO2 <= 0) {
-      setState(() {
-        bottlingRecommendation = "Target CO2 must be a positive number.";
-        predictedBottlingTime = null;
-      });
-      logDebug('Invalid target CO2: $targetCO2');
-      return;
-    }
-    const double co2PerPlato = 5.81;
-    double deltaPlato = targetCO2 / co2PerPlato;
-    double targetPlato = currentPlato - deltaPlato;
-    if (targetPlato <= 0) {
-      setState(() {
-        bottlingRecommendation = "Target CO2 ($targetCO2 g/L) is too high to achieve with remaining fermentation.";
-        predictedBottlingTime = null;
-      });
-      logDebug('Target Plato below zero: $targetPlato');
-      return;
-    }
-    final params = _fitExponentialDecayModel();
-    if (params == null) {
-      setState(() {
-        bottlingRecommendation = "Unable to predict bottling time due to insufficient data.";
-        predictedBottlingTime = null;
-      });
-      return;
-    }
-    double X0 = params["X0"]!;
-    double Xinf = params["Xinf"]!;
-    double k = params["k"]!;
-    double baseTimeEpoch = params["baseTime"]!;
-    if (k <= 0 || X0 <= Xinf) {
-      setState(() {
-        bottlingRecommendation = "Invalid data for prediction.";
-        predictedBottlingTime = null;
-      });
-      logDebug('Invalid data for prediction: k=$k, X0=$X0, Xinf=$Xinf');
-      return;
-    }
-    final ratio = (targetPlato - Xinf) / (X0 - Xinf);
-    if (ratio <= 0 || ratio.isNaN || ratio.isInfinite) {
-      setState(() {
-        bottlingRecommendation = "Target Plato ($targetPlato) is below the expected final value ($Xinf).";
-        predictedBottlingTime = null;
-      });
-      logDebug('Invalid ratio in BottlingCalculator: $ratio');
-      return;
-    }
-    double t = -1 / k * math.log(ratio);
-    DateTime baseTime = DateTime.fromMillisecondsSinceEpoch(baseTimeEpoch.toInt());
-    DateTime predicted = baseTime.add(Duration(minutes: t.round()));
-    setState(() {
-      predictedBottlingTime = predicted;
-      bottlingRecommendation =
-      "Bottle when ${widget.showPlato ? "Plato" : "SG"} reaches ${targetPlato.toStringAsFixed(2)} (around ${DateFormat('MM-dd HH:mm').format(predicted)}) to achieve approximately ${targetCO2.toStringAsFixed(1)} g/L of CO₂.";
-    });
-    logDebug('Bottling recommendation: $bottlingRecommendation');
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: Text('Bottling Calculator for ${widget.batch}'),
-      ),
-      body: Padding(
-        padding: const EdgeInsets.all(10),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              widget.platoList.isNotEmpty
-                  ? (widget.showPlato
-                  ? 'Current Plato: ${widget.platoList.last.value}'
-                  : 'Current SG: ${platoToSG(widget.platoList.last.value).toStringAsFixed(3)}')
-                  : 'Current value: N/A',
-              style: const TextStyle(fontSize: 16),
-            ),
-            const SizedBox(height: 10),
-            Row(
-              children: [
-                Expanded(
-                  child: TextField(
-                    controller: targetCO2Controller,
-                    keyboardType: TextInputType.number,
-                    decoration: const InputDecoration(
-                      hintText: 'Enter target CO₂ g/L (e.g., 5.5)',
-                      labelText: 'Target CO₂ (g/L)',
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 10),
-                ElevatedButton(
-                  onPressed: _calculateBottlingTime,
-                  child: const Text('Calculate'),
-                ),
-              ],
-            ),
-            const SizedBox(height: 10),
-            Text(
-              bottlingRecommendation,
-              style: const TextStyle(fontSize: 14, color: Colors.amber),
-            ),
-            if (predictedBottlingTime != null) ...[
-              const SizedBox(height: 5),
-              Row(
-                children: [
-                  Checkbox(
-                    value: bottlingReminderSet,
-                    onChanged: (bool? value) {
-                      setState(() {
-                        bottlingReminderSet = value ?? false;
-                        if (bottlingReminderSet && predictedBottlingTime != null) {
-                          scheduleNotification(predictedBottlingTime!, widget.batch);
-                          addToCalendar(predictedBottlingTime!, widget.batch);
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(
-                              content: Text('Reminder and calendar event set for bottling time!'),
-                            ),
-                          );
-                        } else {
-                          flutterLocalNotificationsPlugin.cancel(0);
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(content: Text('Bottling reminder cancelled.')),
-                          );
-                        }
-                      });
-                    },
-                  ),
-                  const Text(
-                    'Set reminder for bottling time?',
-                    style: TextStyle(fontSize: 14, color: Colors.white70),
-                  ),
-                ],
-              ),
-            ],
-          ],
-        ),
       ),
     );
   }
