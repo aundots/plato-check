@@ -1,0 +1,1272 @@
+import 'dart:convert';
+import 'dart:io';
+import 'dart:math' as math;
+
+import 'package:flutter/material.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:intl/intl.dart';
+import 'package:share_plus/share_plus.dart';
+import 'package:url_launcher/url_launcher.dart';
+import 'package:fl_chart/fl_chart.dart';
+
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  runApp(const BatchApp());
+}
+
+class BatchApp extends StatelessWidget {
+  const BatchApp({Key? key}) : super(key: key);
+
+  @override
+  Widget build(BuildContext context) {
+    const MaterialColor darkBlueSwatch = MaterialColor(
+      0xFF0D47A1,
+      <int, Color>{
+        50: Color(0xFFE8EAF6),
+        100: Color(0xFFC5CAE9),
+        200: Color(0xFF9FA8DA),
+        300: Color(0xFF7986CB),
+        400: Color(0xFF5C6BC0),
+        500: Color(0xFF3F51B5),
+        600: Color(0xFF3949AB),
+        700: Color(0xFF303F9F),
+        800: Color(0xFF283593),
+        900: Color(0xFF1A237E),
+      },
+    );
+
+    return MaterialApp(
+      title: 'Batch Tracker',
+      theme: ThemeData(
+        brightness: Brightness.dark,
+        primarySwatch: darkBlueSwatch,
+      ),
+      home: const BatchListScreen(),
+    );
+  }
+}
+
+class BatchListScreen extends StatefulWidget {
+  const BatchListScreen({Key? key}) : super(key: key);
+
+  @override
+  _BatchListScreenState createState() => _BatchListScreenState();
+}
+
+class _BatchListScreenState extends State<BatchListScreen> {
+  Map<String, dynamic> data = {};
+  final TextEditingController batchController = TextEditingController();
+  final TextEditingController attenuationController = TextEditingController();
+  final TextEditingController yeastController = TextEditingController();
+  final TextEditingController memoController = TextEditingController();
+
+  bool showPlato = true;
+  bool tempInCelsius = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadData();
+  }
+
+  @override
+  void dispose() {
+    batchController.dispose();
+    attenuationController.dispose();
+    yeastController.dispose();
+    memoController.dispose();
+    super.dispose();
+  }
+
+  Future<File> get _localFile async {
+    final dir = await getApplicationDocumentsDirectory();
+    return File('${dir.path}/data.json');
+  }
+
+  Future<File> get _backupFile async {
+    final dir = await getApplicationDocumentsDirectory();
+    return File('${dir.path}/data.json.bak');
+  }
+
+  Future<void> _loadData() async {
+    try {
+      final file = await _localFile;
+      if (await file.exists()) {
+        final backupFile = await _backupFile;
+        await file.copy(backupFile.path);
+
+        final content = await file.readAsString();
+        final rawData = json.decode(content) as Map<String, dynamic>;
+
+        // 데이터 마이그레이션: temperature 및 ph 필드 (Plato 엔트리만)
+        final migratedData = rawData.map((batch, info) {
+          final platoList = (info['plato'] as List<dynamic>).map((entry) {
+            final platoEntry = Map<String, dynamic>.from(entry);
+            if (!platoEntry.containsKey('temperature')) {
+              platoEntry['temperature'] = null;
+            }
+            if (!platoEntry.containsKey('ph')) {
+              platoEntry['ph'] = null;
+            }
+            return platoEntry;
+          }).toList();
+          info['plato'] = platoList;
+          // 기존 ph 필드 제거 (배치 레벨)
+          info.remove('ph');
+          return MapEntry(batch, info);
+        });
+
+        setState(() => data = migratedData);
+        await _saveData();
+      }
+    } catch (e) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Error loading or migrating data: $e')),
+      );
+    }
+  }
+
+  Future<void> _saveData() async {
+    try {
+      final file = await _localFile;
+      await file.writeAsString(json.encode(data));
+    } catch (e) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('Error saving data: $e')));
+    }
+  }
+
+  Future<void> _exportToCSV() async {
+    final buffer = StringBuffer();
+    // pH 열 제거 (배치 레벨)
+    buffer.writeln('Batch,Date,Plato Value,Attenuation%,Yeast,Memo,Temp(${tempInCelsius ? '°C' : '°F'})');
+    for (var entry in data.entries) {
+      final b = entry.key;
+      final info = entry.value;
+      final lastPlato = (info['plato'] as List).isNotEmpty
+          ? double.parse(info['plato'].last['value']).toStringAsFixed(1)
+          : '';
+      final att = info['attenuation']?.toString() ?? '';
+      final yeast = info['yeast'] ?? '';
+      final memo = info['memo'] ?? '';
+      final temp = info['temperature']?.toString() ?? '';
+      buffer.writeln('$b,${info['date']},$lastPlato,$att,$yeast,$memo,$temp');
+    }
+    final dir = await getTemporaryDirectory();
+    final file = File('${dir.path}/batches.csv');
+    await file.writeAsString(buffer.toString());
+    Share.shareXFiles([XFile(file.path)], text: 'Batch Data Export');
+  }
+
+  void _addBatch() {
+    final name = batchController.text.trim();
+    if (name.isEmpty || data.containsKey(name)) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Batch name is empty or already exists')),
+      );
+      return;
+    }
+    setState(() {
+      data[name] = {
+        'date': DateFormat('MM-dd HH:mm').format(DateTime.now()),
+        'plato': <Map<String, String?>>[],
+        'attenuation': attenuationController.text.isEmpty
+            ? null
+            : double.tryParse(attenuationController.text),
+        'yeast': yeastController.text.trim().isEmpty
+            ? null
+            : yeastController.text.trim(),
+        'memo': memoController.text.trim().isEmpty
+            ? null
+            : memoController.text.trim(),
+        'temperature': null,
+      };
+    });
+    _saveData();
+    batchController.clear();
+    attenuationController.clear();
+    yeastController.clear();
+    memoController.clear();
+  }
+
+  void _confirmDeleteBatch(String batch) {
+    showDialog(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('Confirm Deletion'),
+        content: Text('Delete batch "$batch"?'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Cancel')),
+          TextButton(
+              onPressed: () {
+                setState(() => data.remove(batch));
+                _saveData();
+                Navigator.pop(context);
+              },
+              child: const Text('Delete')),
+        ],
+      ),
+    );
+  }
+
+  void _editBatch(String oldBatch) {
+    final nameCtrl = TextEditingController(text: oldBatch);
+    final attCtrl = TextEditingController(
+        text: data[oldBatch]['attenuation']?.toString() ?? '');
+    final yeastCtrl =
+        TextEditingController(text: data[oldBatch]['yeast'] ?? '');
+    final memoCtrl = TextEditingController(text: data[oldBatch]['memo'] ?? '');
+    DateTime selected =
+        DateFormat('MM-dd HH:mm').parse(data[oldBatch]['date']);
+    selected = DateTime(DateTime.now().year, selected.month, selected.day,
+        selected.hour, selected.minute);
+
+    showDialog(
+      context: context,
+      builder: (_) => StatefulBuilder(
+        builder: (ctx, setDialog) => AlertDialog(
+          title: const Text('Edit Batch'),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextField(
+                    controller: nameCtrl,
+                    decoration: const InputDecoration(labelText: 'Batch Name')),
+                const SizedBox(height: 8),
+                TextField(
+                    controller: attCtrl,
+                    decoration:
+                        const InputDecoration(labelText: 'Attenuation %'),
+                    keyboardType: TextInputType.number),
+                const SizedBox(height: 8),
+                TextField(
+                    controller: yeastCtrl,
+                    decoration:
+                        const InputDecoration(labelText: 'Yeast Strain')),
+                const SizedBox(height: 8),
+                TextField(
+                    controller: memoCtrl,
+                    decoration: const InputDecoration(labelText: 'Memo')),
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    Text(
+                        'Date: ${DateFormat('MM-dd HH:mm').format(selected)}'),
+                    IconButton(
+                        icon: const Icon(Icons.calendar_today),
+                        onPressed: () async {
+                          final d = await showDatePicker(
+                            context: context,
+                            initialDate: selected,
+                            firstDate: DateTime(2000),
+                            lastDate: DateTime(2100),
+                          );
+                          if (d != null) {
+                            final tm = await showTimePicker(
+                              context: context,
+                              initialTime:
+                                  TimeOfDay.fromDateTime(selected),
+                            );
+                            if (tm != null) {
+                              setDialog(() => selected = DateTime(d.year,
+                                  d.month, d.day, tm.hour, tm.minute));
+                            }
+                          }
+                        }),
+                  ],
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('Cancel')),
+            TextButton(
+                onPressed: () {
+                  final newName = nameCtrl.text.trim();
+                  if (newName.isEmpty ||
+                      (newName != oldBatch && data.containsKey(newName))) {
+                    ScaffoldMessenger.of(ctx).showSnackBar(
+                      const SnackBar(
+                          content: Text(
+                              'Batch name is empty or already exists')),
+                    );
+                    return;
+                  }
+                  setState(() {
+                    final info = data.remove(oldBatch)!;
+                    info['attenuation'] = attCtrl.text.isEmpty
+                        ? null
+                        : double.tryParse(attCtrl.text);
+                    info['yeast'] = yeastCtrl.text.trim().isEmpty
+                        ? null
+                        : yeastCtrl.text.trim();
+                    info['memo'] = memoCtrl.text.trim().isEmpty
+                        ? null
+                        : memoCtrl.text.trim();
+                    info['date'] =
+                        DateFormat('MM-dd HH:mm').format(selected);
+                    data[newName] = info;
+                  });
+                  _saveData();
+                  Navigator.pop(ctx);
+                },
+                child: const Text('Save')),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _sendFeedback() async {
+    final Uri emailUri = Uri(
+      scheme: 'mailto',
+      path: 'support@example.com',
+      queryParameters: {'subject': 'Batch Tracker Feedback'},
+    );
+    if (await canLaunchUrl(emailUri)) {
+      await launchUrl(emailUri);
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Could not launch email client')),
+      );
+    }
+  }
+
+  void _launchEinGlas() async {
+    final Uri url = Uri.parse('https://www.einglas.com');
+    if (await canLaunchUrl(url)) {
+      await launchUrl(url);
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Could not launch URL')),
+      );
+    }
+  }
+
+  double platoToSG(double plato) {
+    return 1 + (plato / (258.6 - ((plato / 258.2) * 227.1)));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final batchList = data.keys.toList().reversed.toList();
+    return Scaffold(
+      appBar: AppBar(
+        leading: Builder(
+          builder: (context) => IconButton(
+            icon: const Icon(Icons.menu),
+            onPressed: () => Scaffold.of(context).openDrawer(),
+          ),
+        ),
+        title: const Text('Batch List'),
+        actions: [
+          ToggleButtons(
+            borderRadius: BorderRadius.circular(8),
+            children: const [
+              Padding(
+                padding: EdgeInsets.symmetric(horizontal: 8),
+                child: Text("Plato"),
+              ),
+              Padding(
+                padding: EdgeInsets.symmetric(horizontal: 8),
+                child: Text("SG"),
+              ),
+            ],
+            isSelected: [showPlato, !showPlato],
+            onPressed: (index) {
+              setState(() {
+                showPlato = index == 0;
+              });
+            },
+          ),
+          IconButton(
+            icon: const Icon(Icons.share),
+            onPressed: _exportToCSV,
+          ),
+        ],
+      ),
+      drawer: Drawer(
+        child: ListView(
+          padding: EdgeInsets.zero,
+          children: [
+            const DrawerHeader(
+              decoration: BoxDecoration(
+                color: Color(0xFF0D47A1),
+              ),
+              child: Text(
+                'Menu',
+                style: TextStyle(color: Colors.white, fontSize: 24),
+              ),
+            ),
+            ListTile(
+              title: const Text('Placeholder'),
+              onTap: () {
+                Navigator.pop(context);
+              },
+            ),
+          ],
+        ),
+      ),
+      body: Stack(
+        children: [
+          Column(
+            children: [
+              Padding(
+                padding: const EdgeInsets.all(10),
+                child: Column(
+                  children: [
+                    Row(
+                      children: [
+                        Expanded(
+                          child: TextField(
+                            controller: batchController,
+                            decoration: const InputDecoration(
+                                hintText: 'Enter Batch Number'),
+                            onSubmitted: (_) => _addBatch(),
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        ElevatedButton(
+                          onPressed: _addBatch,
+                          child: const Text('Add'),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: TextField(
+                            controller: attenuationController,
+                            decoration: const InputDecoration(
+                                hintText: 'Attenuation %'),
+                            keyboardType: TextInputType.number,
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: TextField(
+                            controller: yeastController,
+                            decoration: const InputDecoration(
+                                hintText: 'Yeast Strain'),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+                    TextField(
+                      controller: memoController,
+                      decoration: const InputDecoration(hintText: 'Memo'),
+                    ),
+                  ],
+                ),
+              ),
+              Expanded(
+                child: batchList.isEmpty
+                    ? const Center(
+                        child: Text(
+                            'Your batch list is empty. Create your first batch!'),
+                      )
+                    : ListView.builder(
+                        itemCount: batchList.length,
+                        itemBuilder: (context, index) {
+                          final batch = batchList[index];
+                          final info = data[batch];
+                          final platoEntries = info['plato'] as List<dynamic>;
+                          String subtitle = '';
+                          if (platoEntries.isNotEmpty) {
+                            final latest = platoEntries.last;
+                            if (showPlato) {
+                              subtitle +=
+                                  'Latest Plato: ${latest['value']} at ${latest['date']}';
+                            } else {
+                              final p = double.tryParse(latest['value']) ?? 0;
+                              final sg = platoToSG(p);
+                              subtitle +=
+                                  'Latest SG: ${sg.toStringAsFixed(3)} at ${latest['date']}';
+                            }
+                          } else {
+                            subtitle += 'No Plato recorded';
+                          }
+                          subtitle += '\nAtt: ${info['attenuation']?.toString() ?? '-'}%';
+                          subtitle += ', Yeast: ${info['yeast'] ?? '-'}';
+                          subtitle += ', Memo: ${info['memo'] ?? '-'}';
+
+                          return ListTile(
+                            title: Text('$batch | ${info['date']}'),
+                            subtitle: Text(subtitle),
+                            trailing: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                IconButton(
+                                  icon: const Icon(Icons.edit),
+                                  onPressed: () => _editBatch(batch),
+                                ),
+                                IconButton(
+                                  icon: const Icon(Icons.delete),
+                                  onPressed: () => _confirmDeleteBatch(batch),
+                                ),
+                              ],
+                            ),
+                            onTap: () async {
+                              await Navigator.push(
+                                context,
+                                MaterialPageRoute(
+                                  builder: (context) => PlatoScreen(
+                                    batch: batch,
+                                    data: data,
+                                    saveData: _saveData,
+                                    showPlato: showPlato,
+                                    tempInCelsius: tempInCelsius,
+                                  ),
+                                ),
+                              );
+                              setState(() {});
+                            },
+                          );
+                        },
+                      ),
+              ),
+              const SizedBox(height: 60),
+            ],
+          ),
+          Positioned(
+            bottom: 10,
+            left: 20,
+            right: 20,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    ElevatedButton.icon(
+                      onPressed: _sendFeedback,
+                      icon: const Icon(Icons.feedback),
+                      label: const Text('Feedback'),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.blueAccent,
+                      ),
+                    ),
+                    GestureDetector(
+                      onTap: _launchEinGlas,
+                      child: Container(
+                        height: 40,
+                        width: 40,
+                        color: Colors.grey,
+                        child: const Center(child: Text('Logo')),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                const Align(
+                  alignment: Alignment.bottomRight,
+                  child: Text(
+                    'Created by Dipl.Brmst Taesoon',
+                    style: TextStyle(color: Colors.white70, fontSize: 12),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class PlatoScreen extends StatefulWidget {
+  final String batch;
+  final Map<String, dynamic> data;
+  final VoidCallback saveData;
+  final bool showPlato;
+  final bool tempInCelsius;
+
+  const PlatoScreen({
+    Key? key,
+    required this.batch,
+    required this.data,
+    required this.saveData,
+    required this.showPlato,
+    required this.tempInCelsius,
+  }) : super(key: key);
+
+  @override
+  _PlatoScreenState createState() => _PlatoScreenState();
+}
+
+class _PlatoScreenState extends State<PlatoScreen> {
+  final TextEditingController platoController = TextEditingController();
+  final TextEditingController targetPlatoController = TextEditingController();
+  final TextEditingController tempController = TextEditingController();
+  final TextEditingController phController = TextEditingController();
+  bool tempInCelsius = true;
+  double? predictedFG;
+  String predictionResult = "";
+
+  @override
+  void initState() {
+    super.initState();
+    tempInCelsius = widget.tempInCelsius;
+    _calculatePredictedFG();
+  }
+
+  @override
+  void dispose() {
+    platoController.dispose();
+    targetPlatoController.dispose();
+    tempController.dispose();
+    phController.dispose();
+    super.dispose();
+  }
+
+  double platoToSG(double plato) {
+    return 1 + (plato / (258.6 - ((plato / 258.2) * 227.1)));
+  }
+
+  double sgToPlato(double sg) {
+    return (-1 * 616.868) +
+        (1111.14 * sg) -
+        (630.272 * sg * sg) +
+        (135.997 * sg * sg * sg);
+  }
+
+  double calculateABV(double currentPlato, double initialPlato) {
+    final og = platoToSG(initialPlato);
+    final sg = platoToSG(currentPlato);
+    return (og - sg) * 131.25;
+  }
+
+  void _calculatePredictedFG() {
+    final entries = widget.data[widget.batch]['plato'] as List<dynamic>;
+    final att = widget.data[widget.batch]['attenuation'] as double?;
+    if (entries.isNotEmpty && att != null && att >= 0 && att <= 100) {
+      final initial = double.tryParse(entries.first['value']);
+      if (initial != null) {
+        setState(() {
+          predictedFG = initial * (1 - att / 100);
+        });
+      } else {
+        setState(() => predictedFG = null);
+      }
+    } else {
+      setState(() => predictedFG = null);
+    }
+  }
+
+  Map<String, double>? _fitExponentialDecayModel() {
+    final list = widget.data[widget.batch]['plato'] as List<dynamic>;
+    if (list.length < 2) return null;
+
+    final fmt = DateFormat('MM-dd HH:mm');
+    DateTime? base;
+    try {
+      final dt0 = fmt.parse(list.first['date']);
+      base = DateTime(DateTime.now().year, dt0.month, dt0.day, dt0.hour,
+          dt0.minute);
+    } catch (_) {
+      return null;
+    }
+
+    final t = <double>[];
+    final y = <double>[];
+    for (var entry in list) {
+      try {
+        final dt = fmt.parse(entry['date']);
+        final nowDt = DateTime(DateTime.now().year, dt.month, dt.day,
+            dt.hour, dt.minute);
+        t.add(nowDt.difference(base).inMinutes.toDouble());
+        y.add(double.tryParse(entry['value']) ?? 0);
+      } catch (_) {}
+    }
+    if (t.length < 2) return null;
+
+    final X0 = y.first;
+    const Xinf = 0.0;
+    if (X0 == Xinf) return null;
+
+    final lnTerms = <double>[];
+    final tFiltered = <double>[];
+    for (int i = 0; i < t.length; i++) {
+      final num = y[i] - Xinf;
+      final den = X0 - Xinf;
+      if (num > 0 && den > 0) {
+        lnTerms.add(math.log(num / den));
+        tFiltered.add(t[i]);
+      }
+    }
+    if (lnTerms.isEmpty) return null;
+
+    double k;
+    if (lnTerms.length == 1) {
+      k = 0.01;
+    } else {
+      final n = lnTerms.length;
+      final sumT = tFiltered.reduce((a, b) => a + b);
+      final sumLn = lnTerms.reduce((a, b) => a + b);
+      final sumT2 = tFiltered.map((e) => e * e).reduce((a, b) => a + b);
+      final sumTLn = List.generate(n, (i) => tFiltered[i] * lnTerms[i])
+          .reduce((a, b) => a + b);
+      final denom = n * sumT2 - sumT * sumT;
+      if (denom == 0) return null;
+      k = -(n * sumTLn - sumT * sumLn) / denom;
+    }
+
+    return {
+      'X0': X0,
+      'Xinf': Xinf,
+      'k': k,
+      'base': base.millisecondsSinceEpoch.toDouble(),
+    };
+  }
+
+  void _predictTargetTime() {
+    final params = _fitExponentialDecayModel();
+    if (params == null) {
+      setState(() {
+        predictionResult =
+            "Prediction unavailable due to insufficient or inconsistent data.";
+      });
+      return;
+    }
+    final targetInput = double.tryParse(targetPlatoController.text);
+    if (targetInput == null || targetInput <= 0) {
+      setState(() {
+        predictionResult = "Target must be a positive number.";
+      });
+      return;
+    }
+    final target = widget.showPlato ? targetInput : sgToPlato(targetInput);
+    final X0 = params['X0']!;
+    final Xinf = params['Xinf']!;
+    final k = params['k']!;
+    if (target >= X0) {
+      setState(() {
+        predictionResult = "Target ($target) >= initial Plato ($X0).";
+      });
+      return;
+    }
+    final ratio = (target - Xinf) / (X0 - Xinf);
+    if (ratio <= 0) {
+      setState(() {
+        predictionResult = "Target below expected final value ($Xinf).";
+      });
+      return;
+    }
+    final t = -math.log(ratio) / k;
+    final base = DateTime.fromMillisecondsSinceEpoch(params['base']!.toInt());
+    final predicted = base.add(Duration(minutes: t.round()));
+    setState(() {
+      predictionResult =
+          "Estimated at: ${DateFormat('MM-dd HH:mm').format(predicted)}";
+    });
+  }
+
+  void _savePlato() {
+    final val = platoController.text.trim();
+    if (val.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Please enter a value')),
+      );
+      return;
+    }
+    final parsedVal = double.tryParse(val);
+    if (parsedVal == null || parsedVal < 0) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Please enter a valid positive number')),
+      );
+      return;
+    }
+    final tempVal = tempController.text.trim();
+    final parsedTemp = tempVal.isEmpty ? null : double.tryParse(tempVal);
+    if (tempVal.isNotEmpty && (parsedTemp == null || parsedTemp < 0)) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+            content: Text('Please enter a valid positive temperature')),
+      );
+      return;
+    }
+    final phVal = phController.text.trim();
+    final parsedPh = phVal.isEmpty ? null : double.tryParse(phVal);
+    if (phVal.isNotEmpty && (parsedPh == null || parsedPh < 0 || parsedPh > 14)) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+            content: Text('Please enter a valid pH value (0-14)')),
+      );
+      return;
+    }
+    setState(() {
+      (widget.data[widget.batch]['plato'] as List<dynamic>).add({
+        'value': widget.showPlato ? val : sgToPlato(parsedVal).toString(),
+        'date': DateFormat('MM-dd HH:mm').format(DateTime.now()),
+        'temperature': tempVal.isEmpty ? null : tempVal,
+        'ph': phVal.isEmpty ? null : phVal,
+      });
+    });
+    widget.saveData();
+    platoController.clear();
+    tempController.clear();
+    phController.clear();
+    _calculatePredictedFG();
+  }
+
+  void _confirmDeletePlato(int index) {
+    showDialog(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('Confirm Deletion'),
+        content: const Text('Delete this Plato entry?'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Cancel')),
+          TextButton(
+              onPressed: () {
+                setState(() {
+                  widget.data[widget.batch]['plato'].removeAt(index);
+                });
+                widget.saveData();
+                Navigator.pop(context);
+              },
+              child: const Text('Delete')),
+        ],
+      ),
+    );
+  }
+
+  void _editPlato(int index) {
+    final entry = widget.data[widget.batch]['plato'][index];
+    final currentValue = entry['value'];
+    final displayValue = widget.showPlato
+        ? currentValue
+        : platoToSG(double.parse(currentValue)).toStringAsFixed(3);
+    final valueCtrl = TextEditingController(text: displayValue);
+    final tempCtrl = TextEditingController(text: entry['temperature']);
+    final phCtrl = TextEditingController(text: entry['ph']);
+    DateTime selected = DateFormat('MM-dd HH:mm').parse(entry['date']);
+    selected = DateTime(DateTime.now().year, selected.month, selected.day,
+        selected.hour, selected.minute);
+
+    showDialog(
+      context: context,
+      builder: (_) => StatefulBuilder(
+        builder: (ctx, setDialog) => AlertDialog(
+          title: const Text('Edit Plato'),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextField(
+                  controller: valueCtrl,
+                  decoration: InputDecoration(
+                      labelText: widget.showPlato ? 'Plato Value' : 'SG Value'),
+                  keyboardType: TextInputType.number,
+                ),
+                const SizedBox(height: 10),
+                TextField(
+                  controller: tempCtrl,
+                  decoration: InputDecoration(
+                      labelText: 'Temp (${tempInCelsius ? '°C' : '°F'})'),
+                  keyboardType: TextInputType.number,
+                ),
+                const SizedBox(height: 10),
+                TextField(
+                  controller: phCtrl,
+                  decoration: const InputDecoration(labelText: 'pH'),
+                  keyboardType: TextInputType.number,
+                ),
+                const SizedBox(height: 10),
+                Row(
+                  children: [
+                    Expanded(
+                        child: Text(
+                            'Date: ${DateFormat('MM-dd HH:mm').format(selected)}')),
+                    IconButton(
+                        icon: const Icon(Icons.calendar_today),
+                        onPressed: () async {
+                          final d = await showDatePicker(
+                            context: context,
+                            initialDate: selected,
+                            firstDate: DateTime(2000),
+                            lastDate: DateTime(2100),
+                          );
+                          if (d != null) {
+                            final tm = await showTimePicker(
+                              context: context,
+                              initialTime: TimeOfDay.fromDateTime(selected),
+                            );
+                            if (tm != null) {
+                              setDialog(() => selected = DateTime(d.year,
+                                  d.month, d.day, tm.hour, tm.minute));
+                            }
+                          }
+                        }),
+                  ],
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('Cancel')),
+            TextButton(
+                onPressed: () {
+                  final newVal = valueCtrl.text.trim();
+                  final parsedVal = double.tryParse(newVal);
+                  if (newVal.isEmpty || parsedVal == null || parsedVal < 0) {
+                    ScaffoldMessenger.of(ctx).showSnackBar(
+                      const SnackBar(
+                          content:
+                              Text('Please enter a valid positive number')),
+                    );
+                    return;
+                  }
+                  final tempVal = tempCtrl.text.trim();
+                  final parsedTemp =
+                      tempVal.isEmpty ? null : double.tryParse(tempVal);
+                  if (tempVal.isNotEmpty &&
+                      (parsedTemp == null || parsedTemp < 0)) {
+                    ScaffoldMessenger.of(ctx).showSnackBar(
+                      const SnackBar(
+                          content: Text(
+                              'Please enter a valid positive temperature')),
+                    );
+                    return;
+                  }
+                  final phVal = phCtrl.text.trim();
+                  final parsedPh = phVal.isEmpty ? null : double.tryParse(phVal);
+                  if (phVal.isNotEmpty &&
+                      (parsedPh == null || parsedPh < 0 || parsedPh > 14)) {
+                    ScaffoldMessenger.of(ctx).showSnackBar(
+                      const SnackBar(
+                          content: Text('Please enter a valid pH value (0-14)')),
+                    );
+                    return;
+                  }
+                  setState(() {
+                    widget.data[widget.batch]['plato'][index] = {
+                      'value': widget.showPlato
+                          ? newVal
+                          : sgToPlato(parsedVal).toString(),
+                      'date': DateFormat('MM-dd HH:mm').format(selected),
+                      'temperature': tempVal.isEmpty ? null : tempVal,
+                      'ph': phVal.isEmpty ? null : phVal,
+                    };
+                  });
+                  widget.saveData();
+                  Navigator.pop(ctx);
+                },
+                child: const Text('Save')),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildLineChart(List<dynamic> platoList) {
+    if (platoList.isEmpty) {
+      return const Center(child: Text('No data for chart'));
+    }
+    final spots = <FlSpot>[];
+    final labels = <double, String>{};
+    final alcValues = <double>[];
+    final initialPlato = double.tryParse(platoList.first['value']) ?? 0;
+
+    for (var i = 0; i < platoList.length; i++) {
+      final entry = platoList[i];
+      final p = double.tryParse(entry['value']) ?? 0;
+      final y = widget.showPlato ? p : platoToSG(p);
+      spots.add(FlSpot(i.toDouble(), y));
+      labels[i.toDouble()] = entry['date'];
+      alcValues.add(calculateABV(p, initialPlato));
+    }
+    var minY = spots.first.y, maxY = spots.first.y;
+    var minAlc = alcValues.first, maxAlc = alcValues.first;
+    for (var s in spots) {
+      if (s.y < minY) minY = s.y;
+      if (s.y > maxY) maxY = s.y;
+    }
+    for (var a in alcValues) {
+      if (a < minAlc) minAlc = a;
+      if (a > maxAlc) maxAlc = a;
+    }
+    if (minY == maxY) {
+      minY -= 1;
+      maxY += 1;
+    }
+    if (minAlc == maxAlc) {
+      minAlc -= 1;
+      maxAlc += 1;
+    }
+    // ALC%를 Y=0에서 시작하도록 조정
+    minAlc = 0.0; // Y=0에서 시작
+    maxAlc = math.max(maxAlc, minAlc + 1); // 최소 간격 보장
+
+    return LineChart(
+      LineChartData(
+        minY: minY,
+        maxY: maxY,
+        gridData: FlGridData(show: true),
+        borderData: FlBorderData(show: true),
+        lineBarsData: [
+          LineChartBarData(
+            spots: spots,
+            isCurved: true,
+            barWidth: 2,
+            dotData: FlDotData(show: true),
+          ),
+        ],
+        titlesData: FlTitlesData(
+          bottomTitles: AxisTitles(
+            sideTitles: SideTitles(
+              showTitles: true,
+              interval: 1,
+              reservedSize: 40,
+              getTitlesWidget: (v, meta) {
+                final lab = labels[v] ?? '';
+                final parts = lab.split(' ');
+                return SideTitleWidget(
+                  axisSide: meta.axisSide,
+                  space: 8,
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(parts[0], style: const TextStyle(fontSize: 8)),
+                      if (parts.length > 1)
+                        Text(parts[1], style: const TextStyle(fontSize: 8)),
+                    ],
+                  ),
+                );
+              },
+            ),
+          ),
+          leftTitles: AxisTitles(
+            sideTitles: SideTitles(
+              showTitles: true,
+              interval: (maxY - minY) / 4,
+              reservedSize: 40,
+              getTitlesWidget: (v, meta) {
+                return SideTitleWidget(
+                  axisSide: meta.axisSide,
+                  space: 8,
+                  child: Text(
+                    v.toStringAsFixed(widget.showPlato ? 1 : 3),
+                    style: const TextStyle(fontSize: 10),
+                  ),
+                );
+              },
+            ),
+            axisNameWidget: Text(widget.showPlato ? 'Plato' : 'SG'),
+            axisNameSize: 20,
+          ),
+          rightTitles: AxisTitles(
+            sideTitles: SideTitles(
+              showTitles: true,
+              interval: (maxAlc - minAlc) / 4,
+              reservedSize: 40,
+              getTitlesWidget: (v, meta) {
+                // ALC%를 역순으로 표시 (Y=0이 위쪽)
+                final invertedAlc = maxAlc - (v - minAlc);
+                return SideTitleWidget(
+                  axisSide: meta.axisSide,
+                  space: 8,
+                  child: Text(
+                    '${invertedAlc.toStringAsFixed(1)}%',
+                    style: const TextStyle(fontSize: 10),
+                  ),
+                );
+              },
+            ),
+            axisNameWidget: const Text('ALC%'),
+            axisNameSize: 20,
+          ),
+          topTitles: AxisTitles(sideTitles: SideTitles(showTitles: false)),
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final platoList = widget.data[widget.batch]['plato'] as List<dynamic>;
+    final estimatedALC = (predictedFG != null && platoList.isNotEmpty)
+        ? calculateABV(
+            predictedFG!, double.tryParse(platoList.first['value']) ?? 0)
+        : null;
+
+    return Scaffold(
+      appBar: AppBar(
+        title: Text('Plato for ${widget.batch}'),
+        actions: [
+          ToggleButtons(
+            borderRadius: BorderRadius.circular(8),
+            children: const [Text('°C'), Text('°F')],
+            isSelected: [tempInCelsius, !tempInCelsius],
+            onPressed: (i) {
+              setState(() {
+                tempInCelsius = i == 0;
+                if (tempController.text.isNotEmpty) {
+                  final t = double.tryParse(tempController.text) ?? 0;
+                  tempController.text = tempInCelsius
+                      ? ((t - 32) * 5 / 9).toStringAsFixed(1)
+                      : (t * 9 / 5 + 32).toStringAsFixed(1);
+                }
+              });
+            },
+          ),
+        ],
+      ),
+      body: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.all(10),
+            child: Column(
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: TextField(
+                        controller: platoController,
+                        decoration: InputDecoration(
+                          hintText: widget.showPlato ? 'Enter Plato' : 'Enter SG',
+                        ),
+                        keyboardType: TextInputType.number,
+                        onSubmitted: (_) => _savePlato(),
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: TextField(
+                        controller: tempController,
+                        decoration: InputDecoration(
+                          hintText: 'Temp (${tempInCelsius ? '°C' : '°F'})',
+                        ),
+                        keyboardType: TextInputType.number,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    Expanded(
+                      child: TextField(
+                        controller: phController,
+                        decoration: const InputDecoration(hintText: 'pH'),
+                        keyboardType: TextInputType.number,
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    ElevatedButton(
+                      onPressed: _savePlato,
+                      child: const Text('Save'),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center, // 가운데 정렬
+              children: [
+                Text(
+                  predictedFG != null
+                      ? 'Predicted FG: ${predictedFG!.toStringAsFixed(1)}'
+                      : 'Predicted FG: -',
+                  style: const TextStyle(fontSize: 14),
+                ),
+                const SizedBox(width: 20), // 간격 조정
+                Text(
+                  estimatedALC != null
+                      ? 'Estimated ALC%: ${estimatedALC.toStringAsFixed(1)}%'
+                      : 'Estimated ALC%: -',
+                  style: const TextStyle(fontSize: 14),
+                ),
+              ],
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+            child: Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: targetPlatoController,
+                    keyboardType: TextInputType.number,
+                    decoration: InputDecoration(
+                      hintText: widget.showPlato
+                          ? 'Enter target Plato'
+                          : 'Enter target SG',
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                ElevatedButton(
+                  onPressed: _predictTargetTime,
+                  child: const Text('Predict'),
+                ),
+              ],
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
+            child: Text(
+              predictionResult,
+              style: const TextStyle(fontSize: 14, color: Colors.amber),
+            ),
+          ),
+          Expanded(
+            child: platoList.isEmpty
+                ? const Center(child: Text('No Plato entries.'))
+                : ListView.builder(
+                    itemCount: platoList.length,
+                    itemBuilder: (context, index) {
+                      final item = platoList[index];
+                      final value = double.parse(item['value']);
+                      final displayValue = widget.showPlato
+                          ? value.toStringAsFixed(1)
+                          : platoToSG(value).toStringAsFixed(3);
+                      final temp = item['temperature'] ?? '-';
+                      final ph = item['ph'] ?? '-';
+                      return ListTile(
+                        title: Text(
+                          '${widget.showPlato ? 'Plato' : 'SG'}: $displayValue | ${item['date']} | Temp: $temp${temp != '-' ? (tempInCelsius ? '°C' : '°F') : ''} | pH: $ph',
+                        ),
+                        trailing: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            IconButton(
+                              icon: const Icon(Icons.edit),
+                              onPressed: () => _editPlato(index),
+                            ),
+                            IconButton(
+                              icon: const Icon(Icons.delete),
+                              onPressed: () => _confirmDeletePlato(index),
+                            ),
+                          ],
+                        ),
+                      );
+                    },
+                  ),
+          ),
+          Padding(
+            padding: const EdgeInsets.only(bottom: 16),
+            child: SizedBox(
+              height: 220,
+              child: _buildLineChart(platoList),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
